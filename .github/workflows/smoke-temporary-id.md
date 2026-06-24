@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "🧪"
 name: Smoke Temporary ID
 description: Test temporary ID functionality for issue chaining and cross-references
@@ -66,6 +67,8 @@ experiments:
     start_date: "2026-05-23"
     analysis_type: t_test
     tags: [cost-efficiency, sub-agents, smoke-tests]
+features:
+  gh-aw-detection: true
 ---
 
 # Smoke Test: Temporary ID Functionality

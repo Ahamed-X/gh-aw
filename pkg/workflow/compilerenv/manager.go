@@ -19,6 +19,10 @@ const (
 	// DefaultMaxAICredits is the enterprise override for AWF apiProxy.maxAiCredits
 	// when max-ai-credits is not explicitly configured in workflow frontmatter.
 	DefaultMaxAICredits = "GH_AW_DEFAULT_MAX_AI_CREDITS"
+	// DefaultMaxTurnCacheMisses is the enterprise override for AWF
+	// apiProxy.maxCacheMisses when max-turn-cache-misses is not explicitly configured
+	// in workflow frontmatter.
+	DefaultMaxTurnCacheMisses = "GH_AW_DEFAULT_MAX_TURN_CACHE_MISSES"
 	// DefaultDetectionMaxAICredits is the enterprise override for the
 	// threat-detection AWF apiProxy.maxAiCredits budget when
 	// safe-outputs.threat-detection.max-ai-credits is not explicitly configured.
@@ -49,7 +53,7 @@ const (
 // otherwise returns the parsed override as a string.
 func ResolveDefaultMaxTurns(fallback string) string {
 	if parsed, ok := parsePositiveIntEnvVar(DefaultMaxTurns); ok {
-		return strconv.FormatInt(parsed, 10)
+		return strconv.Itoa(parsed)
 	}
 	return fallback
 }
@@ -58,7 +62,16 @@ func ResolveDefaultMaxTurns(fallback string) string {
 // otherwise returns the parsed override.
 func ResolveDefaultTimeoutMinutes(fallback int) int {
 	if parsed, ok := parsePositiveIntEnvVar(DefaultTimeoutMinutes); ok {
-		return int(parsed)
+		return parsed
+	}
+	return fallback
+}
+
+// ResolveDefaultMaxTurnCacheMisses returns fallback when the env var is unset/invalid,
+// otherwise returns the parsed override.
+func ResolveDefaultMaxTurnCacheMisses(fallback int) int {
+	if parsed, ok := parsePositiveIntEnvVar(DefaultMaxTurnCacheMisses); ok {
+		return parsed
 	}
 	return fallback
 }
@@ -85,15 +98,15 @@ func ResolveDefaultUTC(fallback string) string {
 	return raw
 }
 
-// parsePositiveIntEnvVar parses an environment variable as a base-10 positive int64.
+// parsePositiveIntEnvVar parses an environment variable as a base-10 positive int.
 // It returns (value, true) when the variable is set to a valid value > 0.
 // For unset, empty, non-numeric, or non-positive values, it returns (0, false).
-func parsePositiveIntEnvVar(name string) (int64, bool) {
+func parsePositiveIntEnvVar(name string) (int, bool) {
 	raw := strings.TrimSpace(os.Getenv(name))
 	if raw == "" {
 		return 0, false
 	}
-	parsed, err := strconv.ParseInt(raw, 10, 64)
+	parsed, err := strconv.Atoi(raw)
 	if err != nil || parsed <= 0 {
 		return 0, false
 	}

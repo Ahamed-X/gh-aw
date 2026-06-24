@@ -14,22 +14,31 @@ const { getBundlePathForBranch, getBundlePathForBranchInRepo } = require("./gene
 // The privileged handler derives patch/bundle paths from `branch` (and `repo`)
 // via resolveTransportPaths, so tests must write transport files at the
 // canonical derived location and let the handler discover them.
+//
+// `/tmp/gh-aw` is a process-global path shared by every test file. Vitest runs
+// test files in parallel processes, so a cleanup that globbed the whole
+// directory would delete another file's in-flight transport files mid-test.
+// Track only the paths this file created and delete just those.
+const createdTransportPaths = new Set();
 function canonicalPatchPath(branch, repo) {
   fs.mkdirSync("/tmp/gh-aw", { recursive: true });
-  return repo ? getPatchPathForBranchInRepo(branch, repo) : getPatchPathForBranch(branch);
+  const p = repo ? getPatchPathForBranchInRepo(branch, repo) : getPatchPathForBranch(branch);
+  createdTransportPaths.add(p);
+  return p;
 }
 function canonicalBundlePath(branch, repo) {
   fs.mkdirSync("/tmp/gh-aw", { recursive: true });
-  return repo ? getBundlePathForBranchInRepo(branch, repo) : getBundlePathForBranch(branch);
+  const p = repo ? getBundlePathForBranchInRepo(branch, repo) : getBundlePathForBranch(branch);
+  createdTransportPaths.add(p);
+  return p;
 }
 function cleanupCanonicalTransports() {
-  try {
-    for (const f of fs.readdirSync("/tmp/gh-aw")) {
-      if (/^aw-.*\.(patch|bundle)$/.test(f)) {
-        fs.rmSync(`/tmp/gh-aw/${f}`, { force: true });
-      }
-    }
-  } catch {}
+  for (const p of createdTransportPaths) {
+    try {
+      fs.rmSync(p, { force: true });
+    } catch {}
+  }
+  createdTransportPaths.clear();
 }
 
 beforeEach(() => {
@@ -219,15 +228,14 @@ describe("create_pull_request - bundle transport shallow checkout", () => {
           return Promise.resolve({ exitCode: 0, stdout: "true\n", stderr: "" });
         }
         if (cmd === "git" && args[0] === "bundle" && args[1] === "verify") {
-          // Declare a fake prerequisite so ensureFullHistoryForBundle proceeds to deepen.
+          // Declare a fake prerequisite so ensureFullHistoryForBundle proceeds.
           return Promise.resolve({ exitCode: 1, stdout: "", stderr: `The bundle requires this ref:\n${"a".repeat(40)}\n` });
         }
-        if (cmd === "git" && args[0] === "merge-base" && args[1] === "--is-ancestor") {
-          // Report prereq missing initially → iterative deepen kicks in; after the
-          // first deepen fetch we still report missing so the fallback --unshallow
-          // path is exercised. The default mock for exec() resolves successfully,
-          // so all 7 deepen steps complete instantly before the fallback fires.
-          return Promise.resolve({ exitCode: 1, stdout: "", stderr: "" });
+        if (cmd === "git" && args[0] === "cat-file" && args[1] === "-e") {
+          // Report the prerequisite object as already present by default so
+          // ensureFullHistoryForBundle returns early (no fetch). Tests that need
+          // to exercise the fetch/deepen path override this within the test.
+          return Promise.resolve({ exitCode: 0, stdout: "", stderr: "" });
         }
         if (cmd === "git" && args[0] === "rev-list") {
           return Promise.resolve({ exitCode: 0, stdout: "1\n", stderr: "" });
@@ -267,7 +275,7 @@ describe("create_pull_request - bundle transport shallow checkout", () => {
     vi.clearAllMocks();
   });
 
-  it("should deepen origin/<base> before fetching bundle in shallow repositories", async () => {
+  it("should fetch bundle prerequisite commits directly from origin in shallow repositories", async () => {
     const patchPath = canonicalPatchPath("feature/test");
     fs.writeFileSync(
       patchPath,
@@ -290,6 +298,35 @@ index 0000000..abc1234
     const bundlePath = canonicalBundlePath("feature/test");
     fs.writeFileSync(bundlePath, "bundle content");
 
+    // Force the prerequisite-missing path so the direct SHA fetch runs.
+    const prereq = "a".repeat(40);
+    let prereqFetched = false;
+    global.exec.getExecOutput = vi.fn().mockImplementation((cmd, args) => {
+      if (cmd === "git" && args[0] === "rev-parse" && args[1] === "--is-shallow-repository") {
+        return Promise.resolve({ exitCode: 0, stdout: "true\n", stderr: "" });
+      }
+      if (cmd === "git" && args[0] === "bundle" && args[1] === "verify") {
+        return Promise.resolve({ exitCode: 1, stdout: "", stderr: `The bundle requires this ref:\n${prereq}\n` });
+      }
+      if (cmd === "git" && args[0] === "config") {
+        return Promise.resolve({ exitCode: 1, stdout: "", stderr: "" });
+      }
+      if (cmd === "git" && args[0] === "cat-file" && args[1] === "-e") {
+        // Missing until the direct SHA fetch brings it in.
+        return Promise.resolve({ exitCode: prereqFetched ? 0 : 1, stdout: "", stderr: "" });
+      }
+      if (cmd === "git" && args[0] === "rev-list") {
+        return Promise.resolve({ exitCode: 0, stdout: "1\n", stderr: "" });
+      }
+      return Promise.resolve({ exitCode: 0, stdout: "", stderr: "" });
+    });
+    global.exec.exec = vi.fn().mockImplementation((cmd, args) => {
+      if (cmd === "git" && Array.isArray(args) && args[0] === "fetch" && args.includes("origin") && args.includes(prereq)) {
+        prereqFetched = true;
+      }
+      return Promise.resolve(0);
+    });
+
     const { main } = require("./create_pull_request.cjs");
     const handler = await main({ base_branch: "main", preserve_branch_name: true });
     const result = await handler({ title: "Test PR", body: "Test body", branch: "feature/test" }, {});
@@ -305,11 +342,14 @@ index 0000000..abc1234
     const bundleTempRef = bundleFetchCall[1][2].split(":")[1];
     expect(global.exec.exec).toHaveBeenCalledWith("git", ["update-ref", "refs/heads/feature/test", bundleTempRef]);
     expect(global.exec.exec).toHaveBeenCalledWith("git", ["reset", "--hard"]);
-    const bundleFetchCallIndex = global.exec.getExecOutput.mock.calls.findIndex(([, args]) => Array.isArray(args) && args[0] === "fetch" && args[1] === bundlePath);
-    // Iterative deepen replaces a single --unshallow: assert the first --deepen step ran.
-    const deepenCallIndex = global.exec.exec.mock.calls.findIndex(([, args]) => Array.isArray(args) && args[0] === "fetch" && typeof args[1] === "string" && args[1].startsWith("--deepen="));
-    expect(deepenCallIndex).toBeGreaterThanOrEqual(0);
-    expect(bundleFetchCallIndex).toBeGreaterThanOrEqual(0);
+    // Primary path: the exact prerequisite SHA is fetched directly from origin,
+    // with no broad iterative deepen and no --unshallow.
+    const directFetch = global.exec.exec.mock.calls.find(([, args]) => Array.isArray(args) && args[0] === "fetch" && args.includes("origin") && args.includes(prereq));
+    expect(directFetch).toBeTruthy();
+    const deepenCall = global.exec.exec.mock.calls.find(([, args]) => Array.isArray(args) && args[0] === "fetch" && typeof args[1] === "string" && args[1].startsWith("--deepen="));
+    expect(deepenCall).toBeUndefined();
+    const unshallowCall = global.exec.exec.mock.calls.find(([, args]) => Array.isArray(args) && args[0] === "fetch" && args.includes("--unshallow"));
+    expect(unshallowCall).toBeUndefined();
   });
 
   it("should pass signed_commits false to bundle pushes", async () => {
@@ -978,6 +1018,48 @@ index 0000000..abc1234
     expect(fallbackIssueBody).toContain("git reset --hard");
     expect(fallbackIssueBody).toContain(`git update-ref -d ${fallbackBundleTempRef}`);
     expect(fallbackIssueBody).not.toContain("refs/heads/autoloop/perf-comparison:refs/heads/autoloop/perf-comparison");
+    expect(fallbackIssueBody).toContain("**Original error:** push rejected");
+    expect(fallbackIssueBody).toContain("Test body");
+    expect(fallbackIssueBody).toContain("Closes \\#57");
+    expect(fallbackIssueBody).toContain("Resolves test-owner/test-repo\\#58");
+    expect(fallbackIssueBody).not.toContain("Closes #57");
+    expect(fallbackIssueBody).not.toContain("Resolves test-owner/test-repo#58");
+  });
+
+  it("should include original error in fallback issue patch instructions when push fails (no bundle)", async () => {
+    const patchPath = canonicalPatchPath("autoloop/perf-comparison");
+    fs.writeFileSync(
+      patchPath,
+      `From abc123 Mon Sep 17 00:00:00 2001
+From: Test Author <test@example.com>
+Date: Mon, 1 Jan 2024 00:00:00 +0000
+Subject: [PATCH] Test commit
+
+diff --git a/test.txt b/test.txt
+new file mode 100644
+index 0000000..abc1234
+--- /dev/null
++++ b/test.txt
+@@ -0,0 +1 @@
++Hello World
+--
+2.34.1
+`
+    );
+    // No bundle file - forces the patch transport fallback path
+    pushSignedSpy.mockRejectedValueOnce(new Error("push rejected"));
+
+    const { main } = require("./create_pull_request.cjs");
+    const handler = await main({ base_branch: "main", preserve_branch_name: true });
+    const result = await handler({ title: "Test PR", body: "Test body\n\nCloses #57\nResolves test-owner/test-repo#58", branch: "autoloop/perf-comparison" }, {});
+
+    expect(result.success).toBe(true);
+    expect(result.fallback_used).toBe(true);
+
+    const fallbackIssueBody = global.github.rest.issues.create.mock.calls[0][0].body;
+    expect(fallbackIssueBody).toContain("**Original error:** push rejected");
+    expect(fallbackIssueBody).toContain("git am --3way");
+    expect(fallbackIssueBody).not.toContain("git update-ref");
     expect(fallbackIssueBody).toContain("Test body");
     expect(fallbackIssueBody).toContain("Closes \\#57");
     expect(fallbackIssueBody).toContain("Resolves test-owner/test-repo\\#58");
@@ -3111,6 +3193,7 @@ describe("create_pull_request - copilot assignee on fallback issues", () => {
 
     // Push fails to trigger the fallback-issue path; issue creation succeeds
     global.github = {
+      request: vi.fn().mockResolvedValue({ data: { id: "task-123" } }),
       rest: {
         pulls: {
           create: vi.fn().mockRejectedValue(Object.assign(new Error("Permission denied"), { status: 403 })),
@@ -3122,9 +3205,13 @@ describe("create_pull_request - copilot assignee on fallback issues", () => {
         issues: {
           create: vi.fn().mockResolvedValue({ data: { number: 99, html_url: "https://github.com/test/issues/99" } }),
           addLabels: vi.fn().mockResolvedValue({}),
+          checkUserCanBeAssigned: vi.fn().mockResolvedValue({}),
+          get: vi.fn().mockResolvedValue({ data: { id: 12345, number: 99, assignees: [], html_url: "", title: "", body: "" } }),
+        },
+        users: {
+          getByUsername: vi.fn().mockResolvedValue({ data: { id: 99999 } }),
         },
       },
-      graphql: vi.fn(),
     };
 
     global.context = {
@@ -3168,50 +3255,37 @@ describe("create_pull_request - copilot assignee on fallback issues", () => {
     vi.clearAllMocks();
   });
 
-  it("should not call graphql for copilot assignment when GH_AW_ASSIGN_COPILOT is not set", async () => {
+  it("should not call request for copilot assignment when GH_AW_ASSIGN_COPILOT is not set", async () => {
     delete process.env.GH_AW_ASSIGN_COPILOT;
 
     const { main } = require("./create_pull_request.cjs");
     const handler = await main({ assignees: ["copilot"], allow_empty: true });
     await handler({ title: "Test PR", body: "Test body" }, {});
 
-    // No graphql calls for copilot assignment
-    expect(global.github.graphql).not.toHaveBeenCalled();
+    // No REST task creation calls for copilot assignment
+    expect(global.github.request).not.toHaveBeenCalled();
   });
 
-  it("should not call graphql when copilot is not in assignees even if GH_AW_ASSIGN_COPILOT is true", async () => {
+  it("should not call request when copilot is not in assignees even if GH_AW_ASSIGN_COPILOT is true", async () => {
     process.env.GH_AW_ASSIGN_COPILOT = "true";
 
     const { main } = require("./create_pull_request.cjs");
     const handler = await main({ assignees: ["user1"], allow_empty: true });
     await handler({ title: "Test PR", body: "Test body" }, {});
 
-    expect(global.github.graphql).not.toHaveBeenCalled();
+    expect(global.github.request).not.toHaveBeenCalled();
   });
 
-  it("should strip copilot from REST assignees for fallback issue but assign via graphql when enabled", async () => {
+  it("should strip copilot from REST assignees for fallback issue but assign via REST task when enabled", async () => {
     process.env.GH_AW_ASSIGN_COPILOT = "true";
 
     // Mock findAgent → getIssueDetails → assignAgentToIssue
-    global.github.graphql
-      .mockResolvedValueOnce({
-        repository: {
-          suggestedActors: {
-            nodes: [{ id: "COPILOT_AGENT_ID", login: "copilot-swe-agent", __typename: "Bot" }],
-          },
-        },
-      })
-      .mockResolvedValueOnce({
-        repository: {
-          issue: {
-            id: "ISSUE_NODE_ID",
-            assignees: { nodes: [] },
-          },
-        },
-      })
-      .mockResolvedValueOnce({
-        replaceActorsForAssignable: { __typename: "ReplaceActorsForAssignablePayload" },
-      });
+    global.github.rest.issues.checkUserCanBeAssigned.mockResolvedValueOnce({});
+    global.github.rest.users.getByUsername.mockResolvedValueOnce({ data: { id: 99999 } });
+    global.github.rest.issues.get.mockResolvedValueOnce({
+      data: { id: 12345, number: 99, assignees: [], html_url: "", title: "", body: "" },
+    });
+    global.github.request.mockResolvedValueOnce({ data: { id: "task-123" } });
 
     const { main } = require("./create_pull_request.cjs");
     const handler = await main({ assignees: ["copilot", "user1"], allow_empty: true });
@@ -3222,8 +3296,8 @@ describe("create_pull_request - copilot assignee on fallback issues", () => {
     expect(issueCall.assignees).not.toContain("copilot");
     expect(issueCall.assignees).toContain("user1");
 
-    // Graphql should be called for copilot assignment
-    expect(global.github.graphql).toHaveBeenCalledTimes(3);
+    // REST task creation should be called once for copilot assignment
+    expect(global.github.request).toHaveBeenCalledTimes(1);
   });
 
   it("should use configured fallback_labels for fallback issues instead of PR labels", async () => {

@@ -37,6 +37,11 @@ type AddInteractiveConfig struct {
 	// permissions.copilot-requests: write is injected into the workflow.
 	UseCopilotRequests bool
 
+	// copilotCLIBillingStatus is the detected org Copilot CLI billing status.
+	// "enabled" — confirmed available; "disabled" — confirmed unavailable; "" — inconclusive.
+	// Populated by selectCopilotAuthMethod() via probeCopilotBillingForOrg().
+	copilotCLIBillingStatus string
+
 	// isPublicRepo tracks whether the target repository is public
 	// This is populated by checkGitRepository() when determining the repo
 	isPublicRepo bool
@@ -47,7 +52,7 @@ type AddInteractiveConfig struct {
 
 	// existingSecrets tracks which secrets already exist in the repository
 	// This is populated by checkExistingSecrets() before engine selection
-	existingSecrets map[string]bool
+	existingSecrets map[string]struct{}
 
 	// addResult holds the result from AddWorkflows, including HasWorkflowDispatch
 	addResult *AddWorkflowsResult

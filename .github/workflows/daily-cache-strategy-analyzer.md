@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "📊"
 name: Daily Cache Strategy Analyzer
 description: Analyzes agentic workflow logs daily for cache misses and misconfigured caches in workflows that use cache-memory, tracks history across runs, and creates issues when problems or improvements are found
@@ -19,9 +20,9 @@ engine:
 strict: true
 experiments:
   model_size:
-    variants: [gpt-5.4, gpt-5-codex]
+    variants: [gpt-5.4, gpt-5-mini]
     description: "Compares codex-compatible models for cache issue detection quality and efficiency."
-    hypothesis: "H0: no change in issue creation rate or run success rate. H1: gpt-5-codex reduces AI Credits while keeping run success rate >=0.90."
+    hypothesis: "H0: no change in issue creation rate or run success rate. H1: gpt-5-mini reduces AI Credits while keeping run success rate >=0.90."
     metric: ai_credits_total
     secondary_metrics: [run_success_rate, run_duration_ms]
     guardrail_metrics:
@@ -59,6 +60,8 @@ imports:
   - shared/reporting.md
   - shared/noop-reminder.md
   - shared/otlp.md
+features:
+  gh-aw-detection: true
 ---
 {{#runtime-import? .github/shared-instructions.md}}
 

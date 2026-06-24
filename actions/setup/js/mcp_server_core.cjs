@@ -31,9 +31,10 @@ const fs = require("fs");
 const path = require("path");
 
 const { ReadBuffer } = require("./read_buffer.cjs");
-const { validateRequiredFields, validateStringInputLengths } = require("./mcp_scripts_validation.cjs");
+const { validateRequiredFields, validateStringInputLengths, validateStringMinLengths } = require("./mcp_scripts_validation.cjs");
 const { getErrorMessage } = require("./error_helpers.cjs");
 const { generateEnhancedErrorMessage } = require("./mcp_enhanced_errors.cjs");
+const { createDependencyInstallGate } = require("./mcp_dependencies_manager.cjs");
 
 const encoder = new TextEncoder();
 const PARAMETER_SIMILARITY_DISTANCE_BONUS = 2;
@@ -53,6 +54,7 @@ const UNKNOWN_PARAMETER_LIST_PREVIEW_MAX = 10;
  * @property {Function} [handler] - Tool handler function
  * @property {string} [handlerPath] - Optional file path to handler module (original path from config)
  * @property {number} [timeout] - Timeout in seconds for tool execution (default: 60)
+ * @property {string[]} [dependencies] - Runtime dependencies to install before first invocation
  */
 
 /**
@@ -391,7 +393,12 @@ function loadToolHandlers(server, tools, basePath) {
         // Lazy-load shell handler module
         const { createShellHandler } = require("./mcp_handler_shell.cjs");
         const timeout = tool.timeout || 60; // Default to 60 seconds if not specified
-        tool.handler = createShellHandler(server, toolName, resolvedPath, timeout);
+        const baseHandler = createShellHandler(server, toolName, resolvedPath, timeout);
+        const ensureDependenciesInstalled = createDependencyInstallGate(server, toolName, resolvedPath, tool.dependencies, basePath || process.cwd());
+        tool.handler = async args => {
+          await ensureDependenciesInstalled();
+          return baseHandler(args);
+        };
 
         loadedCount++;
         server.debug(`  [${toolName}] Shell handler created successfully with timeout: ${timeout}s`);
@@ -417,7 +424,12 @@ function loadToolHandlers(server, tools, basePath) {
         // Lazy-load Python handler module
         const { createPythonHandler } = require("./mcp_handler_python.cjs");
         const timeout = tool.timeout || 60; // Default to 60 seconds if not specified
-        tool.handler = createPythonHandler(server, toolName, resolvedPath, timeout);
+        const baseHandler = createPythonHandler(server, toolName, resolvedPath, timeout);
+        const ensureDependenciesInstalled = createDependencyInstallGate(server, toolName, resolvedPath, tool.dependencies, basePath || process.cwd());
+        tool.handler = async args => {
+          await ensureDependenciesInstalled();
+          return baseHandler(args);
+        };
 
         loadedCount++;
         server.debug(`  [${toolName}] Python handler created successfully with timeout: ${timeout}s`);
@@ -428,7 +440,12 @@ function loadToolHandlers(server, tools, basePath) {
         // Lazy-load Go handler module
         const { createGoHandler } = require("./mcp_handler_go.cjs");
         const timeout = tool.timeout || 60; // Default to 60 seconds if not specified
-        tool.handler = createGoHandler(server, toolName, resolvedPath, timeout);
+        const baseHandler = createGoHandler(server, toolName, resolvedPath, timeout);
+        const ensureDependenciesInstalled = createDependencyInstallGate(server, toolName, resolvedPath, tool.dependencies, basePath || process.cwd());
+        tool.handler = async args => {
+          await ensureDependenciesInstalled();
+          return baseHandler(args);
+        };
 
         loadedCount++;
         server.debug(`  [${toolName}] Go handler created successfully with timeout: ${timeout}s`);
@@ -439,7 +456,12 @@ function loadToolHandlers(server, tools, basePath) {
         // Lazy-load JavaScript handler module
         const { createJavaScriptHandler } = require("./mcp_handler_javascript.cjs");
         const timeout = tool.timeout || 60; // Default to 60 seconds if not specified
-        tool.handler = createJavaScriptHandler(server, toolName, resolvedPath, timeout);
+        const baseHandler = createJavaScriptHandler(server, toolName, resolvedPath, timeout);
+        const ensureDependenciesInstalled = createDependencyInstallGate(server, toolName, resolvedPath, tool.dependencies, basePath || process.cwd());
+        tool.handler = async args => {
+          await ensureDependenciesInstalled();
+          return baseHandler(args);
+        };
 
         loadedCount++;
         server.debug(`  [${toolName}] JavaScript handler created successfully with timeout: ${timeout}s`);
@@ -750,9 +772,10 @@ async function handleRequest(server, request, defaultHandler) {
       if (missing.length) {
         const hasRequiredFields = tool.inputSchema && Array.isArray(tool.inputSchema.required) && tool.inputSchema.required.length > 0;
         if (hasRequiredFields && Object.keys(args).length === 0) {
+          const schemaGuidance = generateEnhancedErrorMessage(tool.inputSchema.required, name, tool.inputSchema);
           throw {
             code: -32602,
-            message: `Empty arguments are not allowed — this tool is write-once, not a discovery probe. To inspect the schema, use the tools/list MCP method. To signal that no action is needed, call \`noop\` with a \`message\`.`,
+            message: `Empty arguments are not allowed — this tool is write-once, not a discovery probe. To inspect the schema, use the tools/list MCP method. To signal that no action is needed, call \`noop\` with a \`message\`.\n\n${schemaGuidance}`,
           };
         }
         throw {
@@ -771,10 +794,22 @@ async function handleRequest(server, request, defaultHandler) {
         };
       }
 
+      // Validate minLength constraints from the schema.
+      const tooShort = validateStringMinLengths(args, tool.inputSchema);
+      if (tooShort.length) {
+        const details = tooShort.map(v => `'${v.field}' is too short (minimum ${v.minLength} characters, got ${v.actualLength})`).join(", ");
+        throw {
+          code: -32602,
+          message: `Invalid arguments: ${details}`,
+        };
+      }
+
       // Call handler and await the result (supports both sync and async handlers)
       const handlerResult = await Promise.resolve(handler(args));
       const content = handlerResult && handlerResult.content ? handlerResult.content : [];
-      result = { content, isError: false };
+      // Preserve isError from the handler result (e.g. safe-output handlers return isError:true on error)
+      const isError = !!(handlerResult && handlerResult.isError);
+      result = { content, isError };
     } else if (/^notifications\//.test(method)) {
       // Notifications don't need a response
       return null;
@@ -907,10 +942,11 @@ async function handleMessage(server, req, defaultHandler) {
       if (missing.length) {
         const hasRequiredFields = tool.inputSchema && Array.isArray(tool.inputSchema.required) && tool.inputSchema.required.length > 0;
         if (hasRequiredFields && Object.keys(args).length === 0) {
+          const schemaGuidance = generateEnhancedErrorMessage(tool.inputSchema.required, name, tool.inputSchema);
           server.replyError(
             id,
             -32602,
-            `Empty arguments are not allowed — this tool is write-once, not a discovery probe. To inspect the schema, use the tools/list MCP method. To signal that no action is needed, call \`noop\` with a \`message\`.`
+            `Empty arguments are not allowed — this tool is write-once, not a discovery probe. To inspect the schema, use the tools/list MCP method. To signal that no action is needed, call \`noop\` with a \`message\`.\n\n${schemaGuidance}`
           );
           return;
         }
@@ -926,19 +962,33 @@ async function handleMessage(server, req, defaultHandler) {
         return;
       }
 
+      // Validate minLength constraints from the schema.
+      const tooShort = validateStringMinLengths(args, tool.inputSchema);
+      if (tooShort.length) {
+        const details = tooShort.map(v => `'${v.field}' is too short (minimum ${v.minLength} characters, got ${v.actualLength})`).join(", ");
+        server.replyError(id, -32602, `Invalid arguments: ${details}`);
+        return;
+      }
+
       // Call handler and await the result (supports both sync and async handlers)
       server.debug(`Calling handler for tool: ${name}`);
       const result = await Promise.resolve(handler(args));
       server.debug(`Handler returned for tool: ${name}`);
       const content = result && result.content ? result.content : [];
-      server.replyResult(id, { content, isError: false });
+      // Preserve isError from the handler result (e.g. safe-output handlers return isError:true on error)
+      const isError = !!(result && result.isError);
+      server.replyResult(id, { content, isError });
     } else if (/^notifications\//.test(method)) {
       server.debug(`ignore ${method}`);
     } else {
       server.replyError(id, -32601, `Method not found: ${method}`);
     }
   } catch (e) {
-    server.replyError(id, -32603, e instanceof Error ? e.message : String(e));
+    // Use the error code only if it's a valid JSON-RPC error code (must be a negative integer).
+    // Subprocess exit codes (positive integers like 1, 2, etc.) must not be used as JSON-RPC
+    // error codes, as that would produce non-conformant responses (e.g. "code=1").
+    const code = e && typeof e === "object" && Number.isInteger(e.code) && e.code < 0 ? e.code : -32603;
+    server.replyError(id, code, e && e.message ? String(e.message) : "Internal error");
   }
 }
 

@@ -98,6 +98,12 @@ type PinContext struct {
 	Warnings map[string]bool
 	// RecordResolutionFailure receives unresolved pinning failures for auditing.
 	RecordResolutionFailure func(f ResolutionFailure)
+	// SkipHardcodedFallback skips the entire hardcoded-pin lookup (both exact/strict
+	// and non-strict matches) when dynamic resolution fails. Set this when GH_HOST is
+	// configured to a non-github.com host: the dynamic resolver will query the wrong
+	// host and fail, so silently falling back to bundled pins would produce unverified
+	// SHA pins and mask the real misconfiguration.
+	SkipHardcodedFallback bool
 }
 
 var (
@@ -170,13 +176,12 @@ func buildByRepoIndex(pins []ActionPin) map[string][]ActionPin {
 	for _, pin := range pins {
 		byRepo[pin.Repo] = append(byRepo[pin.Repo], pin)
 	}
-	for repo, repoPins := range byRepo {
+	for _, repoPins := range byRepo {
 		slices.SortFunc(repoPins, func(a, b ActionPin) int {
 			v1 := strings.TrimPrefix(a.Version, "v")
 			v2 := strings.TrimPrefix(b.Version, "v")
 			return semverutil.Compare(v2, v1) // descending by semver
 		})
-		byRepo[repo] = repoPins
 	}
 	return byRepo
 }
@@ -337,7 +342,7 @@ func ResolveActionPin(actionRepo, version string, ctx *PinContext) (string, erro
 	if !ctx.Warnings[cacheKey] {
 		warningMsg := fmt.Sprintf("Unable to pin action %s@%s", actionRepo, version)
 		if ctx.Resolver != nil {
-			warningMsg = fmt.Sprintf("Unable to pin action %s@%s: resolution failed", actionRepo, version)
+			warningMsg += ": resolution failed"
 		}
 		fmt.Fprintln(os.Stderr, console.FormatWarningMessage(warningMsg))
 		ctx.Warnings[cacheKey] = true
@@ -376,7 +381,17 @@ func logDynamicResolutionSkipped(hasResolver, isAlreadySHA bool) {
 }
 
 func resolveActionPinFromHardcodedPins(actionRepo, version string, isAlreadySHA bool, ctx *PinContext) (string, bool) {
+	// When the caller is targeting a non-github.com host (e.g. GHES/GHEC), the
+	// dynamic resolver already failed because it queried the wrong host.  Silently
+	// falling back to bundled pins in that case produces unverified SHA pins and
+	// masks the real problem, so skip this fallback entirely.
+	if ctx.SkipHardcodedFallback {
+		actionPinsLog.Printf("SkipHardcodedFallback set, skipping hardcoded pin lookup for %s@%s", actionRepo, version)
+		return "", false
+	}
+
 	actionPinsLog.Printf("Falling back to hardcoded pins for %s@%s", actionRepo, version)
+
 	matchingPins := GetActionPinsByRepo(actionRepo)
 	if len(matchingPins) == 0 {
 		actionPinsLog.Printf("No hardcoded pins found for %s", actionRepo)

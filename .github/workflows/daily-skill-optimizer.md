@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "⚡"
 name: Daily Skill Optimizer Improvements
 description: Runs fastxyz/skill-optimizer daily, packages results as an artifact, and creates one issue with 3 improvements
@@ -14,7 +15,7 @@ tracker-id: daily-skill-optimizer
 engine:
   id: copilot
   copilot-sdk: true
-  copilot-sdk-driver: .github/drivers/copilot_sdk_driver_sample_typescript.ts
+  driver: .github/drivers/copilot_sdk_driver_sample_typescript.ts
 strict: true
 timeout-minutes: 45
 
@@ -29,7 +30,7 @@ jobs:
       run_status: ${{ steps.run_skill_optimizer.outputs.run_status }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6.0.3
+        uses: actions/checkout@v7.0.0
         with:
           persist-credentials: false
 

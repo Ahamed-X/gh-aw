@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "🧪"
 name: Smoke Update Cross-Repo PR
 description: Smoke test validating cross-repo pull request updates in github/gh-aw-side-repo by adding lines from Homer's Odyssey to the README
@@ -63,6 +64,8 @@ safe-outputs:
 timeout-minutes: 10
 imports:
   - shared/otlp.md
+features:
+  gh-aw-detection: true
 ---
 
 # Smoke Test: Cross-Repo Pull Request Update

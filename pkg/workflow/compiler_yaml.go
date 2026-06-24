@@ -109,6 +109,9 @@ func (c *Compiler) generateWorkflowHeader(yaml *strings.Builder, data *WorkflowD
 		agentInfo.EngineVersions = collectEngineVersionsForMetadata(data)
 		agentInfo.AgentImageRunner = resolveAgentImageRunnerIdentifier(data.RawFrontmatter)
 		metadata := GenerateLockMetadata(LockHashInfo{FrontmatterHash: frontmatterHash, BodyHash: bodyHash}, data.StopTime, c.effectiveStrictMode(data.RawFrontmatter), agentInfo)
+		if metadata.CompilerVersion == "" && c.GetActionTag() != "" {
+			metadata.CompilerVersion = c.GetVersion()
+		}
 		metadataJSON, err := metadata.ToJSON()
 		if err != nil {
 			// Fallback to legacy format if JSON serialization fails
@@ -669,7 +672,7 @@ func (c *Compiler) generatePrompt(yaml *strings.Builder, data *WorkflowData, pre
 			// Extract everything from ".github/" onwards (inclusive)
 			// +1 to skip the leading slash, so we get ".github/workflows/..." not "/.github/workflows/..."
 			workflowFilePath = normalizedPath[githubIndex+1:]
-		} else if strings.HasPrefix(normalizedPath, ".github/") {
+		} else if strings.HasPrefix(normalizedPath, constants.GithubDir) {
 			// Relative path already starting with ".github/" — use as-is.
 			// This can happen when the compiler is invoked with a relative markdown path
 			// (e.g. ".github/workflows/test.md") rather than an absolute one.
@@ -1015,6 +1018,9 @@ func (c *Compiler) generateOutputCollectionStep(yaml *strings.Builder, data *Wor
 	if domainsStr != "" {
 		fmt.Fprintf(yaml, "          GH_AW_ALLOWED_DOMAINS: %q\n", domainsStr)
 	}
+	if data.SafeOutputs != nil && data.SafeOutputs.URLs != "" {
+		fmt.Fprintf(yaml, "          GH_AW_SAFE_OUTPUTS_URLS: %q\n", data.SafeOutputs.URLs)
+	}
 
 	// Add allowed GitHub references configuration for reference escaping
 	if data.SafeOutputs != nil && data.SafeOutputs.AllowGitHubReferences != nil {
@@ -1074,7 +1080,7 @@ func resolveWorkspaceRoot(markdownPath string) string {
 		// Absolute or non-root-relative path: strip everything from "/.github/" onward.
 		return filepath.FromSlash(before)
 	}
-	if strings.HasPrefix(normalized, ".github/") {
+	if strings.HasPrefix(normalized, constants.GithubDir) {
 		// Path already starts at the workspace root.
 		return "."
 	}

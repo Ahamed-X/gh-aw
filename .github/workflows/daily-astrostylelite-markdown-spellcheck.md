@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "📝"
 name: Daily AstroStyleLite Markdown Spellcheck
 description: Runs daily American English spellcheck for AstroStyleLite docs content and opens a safe PR only when findings exist
@@ -32,7 +33,7 @@ jobs:
       dictionary_path: ${{ steps.run_spellcheck.outputs.dictionary_path }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6.0.3
+        uses: actions/checkout@v7.0.0
         with:
           persist-credentials: false
 
@@ -279,6 +280,8 @@ experiments:
 
 imports:
   - shared/otlp.md
+features:
+  gh-aw-detection: true
 ---
 
 # Daily AstroStyleLite Markdown Spellcheck

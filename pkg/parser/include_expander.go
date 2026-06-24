@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/github/gh-aw/pkg/constants"
 	"github.com/github/gh-aw/pkg/logger"
 )
 
@@ -58,10 +59,12 @@ func handleNoIncludeFastPath(content string, extractTools bool) (string, bool) {
 	return content, true
 }
 
-func expandIncludesIteratively(content, baseDir string, extractTools bool) (string, map[string]bool, error) {
+func expandIncludesIteratively(content, baseDir string, extractTools bool) (string, map[string]struct {
+}, error) {
 	const maxDepth = 10
 	currentContent := content
-	visited := make(map[string]bool)
+	visited := make(map[string]struct {
+	})
 	for depth := range maxDepth {
 		includeExpanderLog.Printf("Include expansion depth: %d", depth)
 		processedContent, err := processIncludesWithVisited(currentContent, baseDir, extractTools, visited)
@@ -84,7 +87,8 @@ func includeExpansionComplete(currentContent, processedContent string, extractTo
 	return processedContent == currentContent
 }
 
-func buildIncludedFilesManifest(baseDir string, visited map[string]bool) []string {
+func buildIncludedFilesManifest(baseDir string, visited map[string]struct {
+}) []string {
 	repoRoot := findGitHubRepoRoot(baseDir)
 	includedFiles := make([]string, 0, len(visited))
 	for filePath := range visited {
@@ -192,7 +196,7 @@ func ExtractBodyLevelImportPaths(content, baseDir string) []BodyLevelImport {
 		// Convert relative paths to workspace-root-relative.
 		// Paths already starting with ".github/" are workspace-root-relative.
 		// Absolute paths are used as-is.
-		if !strings.HasPrefix(importPath, ".github/") && !filepath.IsAbs(importPath) {
+		if !strings.HasPrefix(importPath, constants.GithubDir) && !filepath.IsAbs(importPath) {
 			if repoRoot != "" {
 				fullPath := filepath.Join(baseDir, importPath)
 				if rel, err := filepath.Rel(repoRoot, fullPath); err == nil && !strings.HasPrefix(rel, "..") {

@@ -7,6 +7,9 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/github/gh-aw/pkg/setutil"
+	"github.com/github/gh-aw/pkg/sliceutil"
 )
 
 // TestRenderLogsConsoleUnified tests the unified console rendering
@@ -125,10 +128,12 @@ func TestBuildMissingToolsSummaryPopulatesDisplay(t *testing.T) {
 			},
 			MissingTools: []MissingToolReport{
 				{
-					Tool:         "terraform",
-					Reason:       "Infrastructure automation needed",
-					WorkflowName: "test-workflow",
-					RunID:        12345,
+					Tool:   "terraform",
+					Reason: "Infrastructure automation needed",
+					ReportProvenance: ReportProvenance{
+						WorkflowName: "test-workflow",
+						RunID:        12345,
+					},
 				},
 			},
 		},
@@ -159,9 +164,11 @@ func TestBuildMCPFailuresSummaryPopulatesDisplay(t *testing.T) {
 			},
 			MCPFailures: []MCPFailureReport{
 				{
-					ServerName:   "github-mcp-server",
-					WorkflowName: "test-workflow",
-					RunID:        12345,
+					ServerName: "github-mcp-server",
+					ReportProvenance: ReportProvenance{
+						WorkflowName: "test-workflow",
+						RunID:        12345,
+					},
 				},
 			},
 		},
@@ -222,7 +229,7 @@ func TestAddUniqueWorkflow(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := addUniqueWorkflow(tt.workflows, tt.workflow)
+			result := sliceutil.MergeUnique(tt.workflows, tt.workflow)
 			if len(result) != len(tt.expected) {
 				t.Errorf("Expected length %d, got %d", len(tt.expected), len(result))
 			}
@@ -244,10 +251,12 @@ func TestBuildMissingToolsSummaryDeduplication(t *testing.T) {
 			},
 			MissingTools: []MissingToolReport{
 				{
-					Tool:         "terraform",
-					Reason:       "First reason",
-					WorkflowName: "workflow-a",
-					RunID:        12345,
+					Tool:   "terraform",
+					Reason: "First reason",
+					ReportProvenance: ReportProvenance{
+						WorkflowName: "workflow-a",
+						RunID:        12345,
+					},
 				},
 			},
 		},
@@ -257,10 +266,12 @@ func TestBuildMissingToolsSummaryDeduplication(t *testing.T) {
 			},
 			MissingTools: []MissingToolReport{
 				{
-					Tool:         "terraform",
-					Reason:       "Second reason",
-					WorkflowName: "workflow-b",
-					RunID:        12346,
+					Tool:   "terraform",
+					Reason: "Second reason",
+					ReportProvenance: ReportProvenance{
+						WorkflowName: "workflow-b",
+						RunID:        12346,
+					},
 				},
 			},
 		},
@@ -270,10 +281,12 @@ func TestBuildMissingToolsSummaryDeduplication(t *testing.T) {
 			},
 			MissingTools: []MissingToolReport{
 				{
-					Tool:         "terraform",
-					Reason:       "Third reason from workflow-a",
-					WorkflowName: "workflow-a",
-					RunID:        12347,
+					Tool:   "terraform",
+					Reason: "Third reason from workflow-a",
+					ReportProvenance: ReportProvenance{
+						WorkflowName: "workflow-a",
+						RunID:        12347,
+					},
 				},
 			},
 		},
@@ -319,9 +332,11 @@ func TestBuildMCPFailuresSummaryDeduplication(t *testing.T) {
 			},
 			MCPFailures: []MCPFailureReport{
 				{
-					ServerName:   "github-mcp-server",
-					WorkflowName: "workflow-a",
-					RunID:        12345,
+					ServerName: "github-mcp-server",
+					ReportProvenance: ReportProvenance{
+						WorkflowName: "workflow-a",
+						RunID:        12345,
+					},
 				},
 			},
 		},
@@ -331,9 +346,11 @@ func TestBuildMCPFailuresSummaryDeduplication(t *testing.T) {
 			},
 			MCPFailures: []MCPFailureReport{
 				{
-					ServerName:   "github-mcp-server",
-					WorkflowName: "workflow-b",
-					RunID:        12346,
+					ServerName: "github-mcp-server",
+					ReportProvenance: ReportProvenance{
+						WorkflowName: "workflow-b",
+						RunID:        12346,
+					},
 				},
 			},
 		},
@@ -343,9 +360,11 @@ func TestBuildMCPFailuresSummaryDeduplication(t *testing.T) {
 			},
 			MCPFailures: []MCPFailureReport{
 				{
-					ServerName:   "github-mcp-server",
-					WorkflowName: "workflow-a",
-					RunID:        12347,
+					ServerName: "github-mcp-server",
+					ReportProvenance: ReportProvenance{
+						WorkflowName: "workflow-a",
+						RunID:        12347,
+					},
 				},
 			},
 		},
@@ -387,10 +406,12 @@ func TestAggregateSummaryItems(t *testing.T) {
 			},
 			MissingTools: []MissingToolReport{
 				{
-					Tool:         "docker",
-					Reason:       "Container operations needed",
-					WorkflowName: "workflow-a",
-					RunID:        1001,
+					Tool:   "docker",
+					Reason: "Container operations needed",
+					ReportProvenance: ReportProvenance{
+						WorkflowName: "workflow-a",
+						RunID:        1001,
+					},
 				},
 			},
 		},
@@ -400,10 +421,12 @@ func TestAggregateSummaryItems(t *testing.T) {
 			},
 			MissingTools: []MissingToolReport{
 				{
-					Tool:         "docker",
-					Reason:       "Container build needed",
-					WorkflowName: "workflow-b",
-					RunID:        1002,
+					Tool:   "docker",
+					Reason: "Container build needed",
+					ReportProvenance: ReportProvenance{
+						WorkflowName: "workflow-b",
+						RunID:        1002,
+					},
 				},
 			},
 		},
@@ -429,7 +452,7 @@ func TestAggregateSummaryItems(t *testing.T) {
 		},
 		func(summary *MissingToolSummary, tool MissingToolReport) {
 			summary.Count++
-			summary.Workflows = addUniqueWorkflow(summary.Workflows, tool.WorkflowName)
+			summary.Workflows = sliceutil.MergeUnique(summary.Workflows, tool.WorkflowName)
 			summary.RunIDs = append(summary.RunIDs, tool.RunID)
 		},
 		func(summary *MissingToolSummary) {
@@ -530,13 +553,13 @@ func TestAggregateDomainStats(t *testing.T) {
 		}
 
 		// Verify specific domains
-		if !agg.allAllowedDomains["example.com"] {
+		if !setutil.Contains(agg.allAllowedDomains, "example.com") {
 			t.Error("Expected example.com in allowed domains")
 		}
-		if !agg.allAllowedDomains["api.github.com"] {
+		if !setutil.Contains(agg.allAllowedDomains, "api.github.com") {
 			t.Error("Expected api.github.com in allowed domains")
 		}
-		if !agg.allBlockedDomains["blocked.com"] {
+		if !setutil.Contains(agg.allBlockedDomains, "blocked.com") {
 			t.Error("Expected blocked.com in blocked domains")
 		}
 	})
@@ -597,14 +620,16 @@ func TestAggregateDomainStats(t *testing.T) {
 // TestConvertDomainsToSortedSlices tests the domain conversion helper
 func TestConvertDomainsToSortedSlices(t *testing.T) {
 	t.Run("converts and sorts domains", func(t *testing.T) {
-		allowedMap := map[string]bool{
-			"z.com": true,
-			"a.com": true,
-			"m.com": true,
+		allowedMap := map[string]struct {
+		}{
+			"z.com": {},
+			"a.com": {},
+			"m.com": {},
 		}
-		deniedMap := map[string]bool{
-			"y.com": true,
-			"b.com": true,
+		deniedMap := map[string]struct {
+		}{
+			"y.com": {},
+			"b.com": {},
 		}
 
 		allowed, denied := convertDomainsToSortedSlices(allowedMap, deniedMap)
@@ -632,8 +657,10 @@ func TestConvertDomainsToSortedSlices(t *testing.T) {
 	})
 
 	t.Run("handles empty maps", func(t *testing.T) {
-		allowedMap := map[string]bool{}
-		deniedMap := map[string]bool{}
+		allowedMap := map[string]struct {
+		}{}
+		deniedMap := map[string]struct {
+		}{}
 
 		allowed, denied := convertDomainsToSortedSlices(allowedMap, deniedMap)
 

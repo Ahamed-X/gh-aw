@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "🔍"
 description: Runs Markdown quality checks using Super Linter and creates issues for violations
 on:
@@ -31,7 +32,7 @@ jobs:
       statuses: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6.0.3
+        uses: actions/checkout@v7.0.0
         with:
           # super-linter needs the full git history to get the
           # list of files that changed across commits

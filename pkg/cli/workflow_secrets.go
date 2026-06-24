@@ -7,6 +7,7 @@ import (
 	"github.com/github/gh-aw/pkg/constants"
 	"github.com/github/gh-aw/pkg/logger"
 	"github.com/github/gh-aw/pkg/parser"
+	"github.com/github/gh-aw/pkg/setutil"
 	"github.com/github/gh-aw/pkg/workflow"
 )
 
@@ -18,14 +19,16 @@ func getSecretsRequirementsForWorkflows(workflowFiles []string) []SecretRequirem
 	workflowSecretsLog.Printf("Collecting secrets from %d workflow files", len(workflowFiles))
 
 	var allRequirements []SecretRequirement
-	seenSecrets := make(map[string]bool)
+	seenSecrets := make(map[string]struct {
+	})
 
 	// Map getRequiredSecretsForWorkflow over all workflows and union results
 	for _, workflowFile := range workflowFiles {
 		secrets := getSecretRequirementsForWorkflow(workflowFile)
 		for _, req := range secrets {
-			if !seenSecrets[req.Name] {
-				seenSecrets[req.Name] = true
+			if !setutil.Contains(seenSecrets, req.Name) {
+				seenSecrets[req.Name] = struct {
+				}{}
 				allRequirements = append(allRequirements, req)
 			}
 		}
@@ -33,10 +36,11 @@ func getSecretsRequirementsForWorkflows(workflowFiles []string) []SecretRequirem
 
 	// Always add system secrets (deduplicated)
 	for _, sys := range constants.SystemSecrets {
-		if seenSecrets[sys.Name] {
+		if setutil.Contains(seenSecrets, sys.Name) {
 			continue
 		}
-		seenSecrets[sys.Name] = true
+		seenSecrets[sys.Name] = struct {
+		}{}
 		allRequirements = append(allRequirements, SecretRequirement{
 			Name:           sys.Name,
 			WhenNeeded:     sys.WhenNeeded,

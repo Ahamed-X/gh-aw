@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "🔍"
 description: Monthly workflow that identifies stale repositories in an organization and creates detailed activity reports
 name: Stale Repository Identifier
@@ -86,7 +87,7 @@ env:
 steps:
   - name: Run stale-repos
     id: stale-repos
-    uses: github/stale-repos@v9.0.14
+    uses: github/stale-repos@v9.0.15
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       ORGANIZATION: ${{ env.ORGANIZATION }}

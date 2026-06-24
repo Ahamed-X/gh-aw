@@ -34,6 +34,15 @@
 //	  },
 //	  "container": {
 //	    "imageTag": "0.25.29,squid=sha256:..."
+//	  },
+//	  "chroot": {
+//	    "binariesSourcePath": "/tmp/gh-aw",
+//	    "identity": {
+//	      "user": "runner",
+//	      "uid": 1001,
+//	      "gid": 1001,
+//	      "home": "/tmp/gh-aw/home"
+//	    }
 //	  }
 //	}
 //
@@ -56,10 +65,12 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/santhosh-tekuri/jsonschema/v6"
+
 	"github.com/github/gh-aw/pkg/constants"
 	"github.com/github/gh-aw/pkg/jsonutil"
 	"github.com/github/gh-aw/pkg/logger"
-	"github.com/santhosh-tekuri/jsonschema/v6"
+	"github.com/github/gh-aw/pkg/setutil"
 )
 
 //go:embed schemas/awf-config.schema.json
@@ -151,11 +162,18 @@ type AWFConfigFile struct {
 	// Network contains network egress control configuration.
 	Network *AWFNetworkConfig `json:"network,omitempty"`
 
+	// Platform contains GitHub deployment metadata used by AWF auth handling.
+	Platform *AWFPlatformConfig `json:"platform,omitempty"`
+
 	// APIProxy contains API proxy (LLM gateway) configuration.
 	APIProxy *AWFAPIProxyConfig `json:"apiProxy,omitempty"`
 
 	// Container contains container execution configuration.
 	Container *AWFContainerConfig `json:"container,omitempty"`
+
+	// Chroot contains chroot execution overrides for split-filesystem ARC/DinD runners.
+	// This field is not populated at compile time; it is injected at runtime when DinD topology is detected.
+	Chroot *AWFChrootConfig `json:"chroot,omitempty"`
 }
 
 // AWFNetworkConfig is the "network" section of the AWF config file.
@@ -169,6 +187,20 @@ type AWFNetworkConfig struct {
 	// BlockDomains is the list of explicitly blocked egress domains.
 	// Maps to: --block-domains <comma-separated>
 	BlockDomains []string `json:"blockDomains,omitempty"`
+
+	// Isolation enables topology-based egress isolation mode.
+	// Maps to: --network-isolation
+	Isolation bool `json:"isolation,omitempty"`
+
+	// TopologyAttach lists container names AWF should attach to awf-net.
+	// Maps to: --topology-attach <name> (repeatable)
+	TopologyAttach []string `json:"topologyAttach,omitempty"`
+}
+
+// AWFPlatformConfig is the "platform" section of the AWF config file.
+type AWFPlatformConfig struct {
+	// Type is the GitHub deployment type consumed by AWF for auth behavior.
+	Type string `json:"type,omitempty"`
 }
 
 // AWFAPIProxyConfig is the "apiProxy" section of the AWF config file.
@@ -183,6 +215,9 @@ type AWFAPIProxyConfig struct {
 
 	// MaxRuns is the maximum number of LLM invocations allowed for a run.
 	MaxRuns int `json:"maxRuns,omitempty"`
+
+	// MaxTurnCacheMisses is the maximum number of consecutive cache misses allowed for a run.
+	MaxTurnCacheMisses int `json:"maxCacheMisses,omitempty"`
 
 	// MaxAICredits is the explicit per-run AI credits budget enforced by the API proxy.
 	MaxAICredits int64 `json:"maxAiCredits,omitempty"`
@@ -240,6 +275,39 @@ type AWFContainerConfig struct {
 	// Format: "<tag>" or "<tag>,squid=sha256:...,agent=sha256:..."
 	// Maps to: --image-tag <value>
 	ImageTag string `json:"imageTag,omitempty"`
+}
+
+// AWFChrootConfig is the "chroot" section of the AWF config file.
+// It configures chroot execution overrides for split-filesystem ARC/DinD runners.
+// These fields let AWF handle binary staging and identity resolution natively,
+// eliminating the need for bootstrap actions on ARC/DinD topologies.
+type AWFChrootConfig struct {
+	// BinariesSourcePath is the runner-side directory to overlay at /usr/local/bin
+	// inside chroot mode for split-filesystem ARC/DinD runners.
+	BinariesSourcePath string `json:"binariesSourcePath,omitempty"`
+
+	// Identity configures identity values applied after chroot pivot to override
+	// HOME/USER/LOGNAME defaults inside chroot mode.
+	Identity *AWFChrootIdentityConfig `json:"identity,omitempty"`
+}
+
+// AWFChrootIdentityConfig is the "chroot.identity" section of the AWF config file.
+// It provides identity values applied after chroot pivot to override HOME/USER
+// defaults inside chroot mode.
+type AWFChrootIdentityConfig struct {
+	// User is the USER/LOGNAME string to export inside chroot mode.
+	User string `json:"user,omitempty"`
+
+	// UID is the UID hint used for chroot identity synthesis and user switching.
+	// Must be >= 1 (root is not supported).
+	UID int `json:"uid,omitempty"`
+
+	// GID is the GID hint used for chroot identity synthesis and user switching.
+	// Must be >= 1.
+	GID int `json:"gid,omitempty"`
+
+	// Home is the home directory path to export inside chroot mode.
+	Home string `json:"home,omitempty"`
 }
 
 // buildAWFConfigSchemaURL returns the release-pinned JSON schema URL for the AWF config file.
@@ -301,6 +369,20 @@ func BuildAWFConfigJSON(config AWFCommandConfig) (string, error) {
 		}
 	}
 
+	if isAWFNetworkIsolationEnabled(config.WorkflowData) {
+		if awfConfig.Network == nil {
+			awfConfig.Network = &AWFNetworkConfig{}
+		}
+		awfConfig.Network.Isolation = true
+		awfConfig.Network.TopologyAttach = buildAWFTopologyAttachList(config.WorkflowData)
+		awfConfigLog.Printf("Network section: isolation enabled with %d topology attachments", len(awfConfig.Network.TopologyAttach))
+	}
+
+	if platformType := extractPlatformType(config.WorkflowData); platformType != "" {
+		awfConfig.Platform = &AWFPlatformConfig{Type: platformType}
+		awfConfigLog.Printf("Platform section: type=%s", platformType)
+	}
+
 	// ── API proxy section ─────────────────────────────────────────────────────
 	// maxAICredits is taken from frontmatter/imports only; when unset (0) the
 	// runtime value is resolved from vars.GH_AW_DEFAULT_MAX_AI_CREDITS via a
@@ -308,11 +390,15 @@ func BuildAWFConfigJSON(config AWFCommandConfig) (string, error) {
 	// BuildAWFCommand (see injectMaxAICreditsExpression in awf_helpers.go).
 	maxAICredits := int64(0)
 	maxRuns := constants.DefaultMaxRuns
+	// GetMaxTurnCacheMisses handles nil receiver and env-var fallback, so pre-init
+	// via the nil receiver avoids a redundant os.Getenv when EngineConfig is set.
+	maxTurnCacheMisses := (*EngineConfig)(nil).GetMaxTurnCacheMisses()
 	if config.WorkflowData != nil && config.WorkflowData.EngineConfig != nil {
 		if config.WorkflowData.EngineConfig.MaxAICredits != 0 {
 			maxAICredits = config.WorkflowData.EngineConfig.MaxAICredits
 		}
 		maxRuns = config.WorkflowData.EngineConfig.GetMaxRuns()
+		maxTurnCacheMisses = config.WorkflowData.EngineConfig.GetMaxTurnCacheMisses()
 	}
 
 	// Token steering is enabled by default. Setting max-ai-credits to a negative
@@ -327,6 +413,7 @@ func BuildAWFConfigJSON(config AWFCommandConfig) (string, error) {
 	apiProxy := &AWFAPIProxyConfig{
 		Enabled:             true,
 		MaxRuns:             maxRuns,
+		MaxTurnCacheMisses:  maxTurnCacheMisses,
 		MaxAICredits:        maxAICredits,
 		EnableTokenSteering: enableTokenSteering && awfSupportsTokenSteering(firewallConfig),
 	}
@@ -433,16 +520,30 @@ func BuildAWFConfigJSON(config AWFCommandConfig) (string, error) {
 	return jsonStr, nil
 }
 
+// buildAWFTopologyAttachList returns container names that AWF should attach to
+// the internal awf-net network when network isolation mode is enabled.
+// The list always includes the MCP gateway and conditionally includes the
+// host-started CLI proxy sidecar when gh-proxy mode is active.
+func buildAWFTopologyAttachList(workflowData *WorkflowData) []string {
+	targets := []string{"awmg-mcpg"}
+	if isCliProxyNeeded(workflowData) {
+		targets = append(targets, "awmg-cli-proxy")
+	}
+	return targets
+}
+
 // splitDomainList splits a comma-separated domain string into a deduplicated
 // slice. Empty entries are ignored. The order of the original list is preserved for
 // non-duplicate entries; this keeps the allow-list deterministic.
 func splitDomainList(domains string) []string {
 	var result []string
-	seen := make(map[string]bool)
+	seen := make(map[string]struct {
+	})
 	for d := range strings.SplitSeq(domains, ",") {
 		d = strings.TrimSpace(d)
-		if d != "" && !seen[d] {
-			seen[d] = true
+		if d != "" && !setutil.Contains(seen, d) {
+			seen[d] = struct {
+			}{}
 			result = append(result, d)
 		}
 	}
@@ -457,6 +558,21 @@ func extractModelMultipliers(workflowData *WorkflowData) map[string]float64 {
 		return nil
 	}
 	return workflowData.EngineConfig.TokenWeights.Multipliers
+}
+
+// extractPlatformType returns sandbox.agent.platform only for enabled AWF sandbox
+// agents, or an empty string to let AWF fall back to its default platform logic.
+func extractPlatformType(workflowData *WorkflowData) string {
+	if workflowData == nil || workflowData.SandboxConfig == nil || workflowData.SandboxConfig.Agent == nil {
+		return ""
+	}
+	if workflowData.SandboxConfig.Agent.Disabled {
+		return ""
+	}
+	if !isSupportedSandboxType(getAgentType(workflowData.SandboxConfig.Agent)) {
+		return ""
+	}
+	return workflowData.SandboxConfig.Agent.Platform
 }
 
 // extractModelFallback returns an AWFModelFallbackConfig if the workflow has configured

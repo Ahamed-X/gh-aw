@@ -31,6 +31,7 @@ import (
 
 	"github.com/github/gh-aw/pkg/constants"
 	"github.com/github/gh-aw/pkg/logger"
+	"github.com/github/gh-aw/pkg/setutil"
 	"github.com/github/gh-aw/pkg/workflow/compilerenv"
 )
 
@@ -50,6 +51,27 @@ const (
 	// any other TCP Docker daemon configuration.
 	awfArcDindDockerHostRegex    = `^tcp://`
 	awfArcDindHostPathPrefixFlag = "--docker-host-path-prefix /tmp/gh-aw"
+
+	// awfArcDindChrootBinariesSourcePath is the runner-side directory that AWF overlays
+	// at /usr/local/bin inside chroot mode for ARC/DinD split-filesystem runners.
+	// This is the gh-aw staging directory that holds pre-downloaded binaries (e.g., copilot).
+	awfArcDindChrootBinariesSourcePath = "/tmp/gh-aw"
+
+	// awfArcDindChrootIdentityHome is the home directory path exported inside chroot mode
+	// for ARC/DinD runners. A dedicated directory under /tmp/gh-aw is used so that the
+	// runner user has a consistent home that exists on the daemon-visible filesystem.
+	awfArcDindChrootIdentityHome = "/tmp/gh-aw/home"
+
+	// awfShellcheckDirective suppresses shellcheck warnings only on the generated AWF
+	// invocation line:
+	//   - SC1003 is expected because generated GitHub expression literals can include
+	//     single quotes (for example ports['<port>']) and must survive unchanged.
+	//   - SC2086 is expected because compiler-owned AWF argument fragments are emitted
+	//     as intentional expandable shell snippets (for example ${GH_AW_TOOL_CACHE_MOUNT:+...}
+	//     and ${GH_AW_DOCKER_HOST_PATH_PREFIX_ARGS}).
+	//
+	// User-controlled values remain quoted via shellEscapeArg/shellJoinArgs.
+	awfShellcheckDirective = "# shellcheck disable=SC1003,SC2086"
 )
 
 // AWFCommandConfig contains configuration for building AWF commands.
@@ -164,43 +186,12 @@ func buildWorkflowCallNetworkAllowedUpdateScript() (string, error) {
 		return "", fmt.Errorf("marshal network allowed ecosystem map: %w", err)
 	}
 
-	return fmt.Sprintf(`python - <<'PY'
-import json
-import os
-from pathlib import Path
-
-runner_temp = os.environ.get("RUNNER_TEMP")
-if not runner_temp:
-    raise SystemExit("RUNNER_TEMP is not set")
-
-config_path = Path(runner_temp) / "gh-aw" / "awf-config.json"
-try:
-    config = json.loads(config_path.read_text())
-except FileNotFoundError as exc:
-    raise SystemExit(f"Missing AWF config file at {config_path}") from exc
-except json.JSONDecodeError as exc:
-    raise SystemExit(f"Invalid AWF config JSON at {config_path}: {exc}") from exc
-except OSError as exc:
-    raise SystemExit(f"Failed to read AWF config file at {config_path}: {exc}") from exc
-
-network_allowed = os.environ.get(%q, "")
-tokens = [token.strip() for token in network_allowed.split(",") if token.strip()]
-
-if tokens:
-    ecosystem_map = json.loads(r'''%s''')
-    allow_domains = config.setdefault("network", {}).setdefault("allowDomains", [])
-    seen = set(allow_domains)
-    for token in tokens:
-        for domain in ecosystem_map.get(token, [token]):
-            if domain not in seen:
-                allow_domains.append(domain)
-                seen.add(domain)
-
-try:
-    config_path.write_text(json.dumps(config, separators=(",", ":"), ensure_ascii=False) + "\n")
-except OSError as exc:
-    raise SystemExit(f"Failed to write AWF config file at {config_path}: {exc}") from exc
-PY`, string(WorkflowCallNetworkAllowedEnvVar), string(ecosystemJSON)), nil
+	// Pass the ecosystem map JSON via an env var and invoke the JavaScript
+	// implementation deployed by actions/setup to ${RUNNER_TEMP}/gh-aw/actions/.
+	// Using node avoids any Python dependency and eliminates quote-injection risk:
+	// shellEscapeArg safely single-quotes and escapes the JSON payload.
+	return fmt.Sprintf(`GH_AW_ECOSYSTEM_MAP_JSON=%s node "${RUNNER_TEMP}/gh-aw/actions/update_network_allowed.cjs"`,
+		shellEscapeArg(string(ecosystemJSON))), nil
 }
 
 // BuildAWFCommand builds a complete AWF command with all arguments.
@@ -228,7 +219,9 @@ func BuildAWFCommand(config AWFCommandConfig) string {
 	// Auto-detect ARC/DinD split daemon topology at runtime: probe DOCKER_HOST for a
 	// tcp:// scheme and pass it through to AWF via --docker-host, and emit
 	// --docker-host-path-prefix when supported by the selected AWF version.
-	// Both behaviors avoid requiring workflow-authored sandbox.agent.args for standard ARC DinD setups.
+	// All behaviors avoid requiring workflow-authored sandbox.agent.args for standard ARC DinD setups.
+	// When AWF also supports chroot config (v0.27.1+), the Python patch body is embedded inside
+	// the same if-block so the script only contains one DOCKER_HOST condition check.
 	arcDindPrefixProbe := ""
 	arcDindPrefixArgsRef := ""
 	arcDindDockerHostProbe := fmt.Sprintf(`%s=""
@@ -241,26 +234,32 @@ fi`,
 	)
 	arcDindDockerHostRef := fmt.Sprintf("${%s:+--docker-host \"$%s\"}", awfDockerHostVarName, awfDockerHostVarName)
 	if awfSupportsDockerHostPathPrefix(firewallConfig) {
+		chrootPatchBody := ""
+		if awfSupportsChrootConfig(firewallConfig) {
+			if config.WorkflowData != nil && config.WorkflowData.IsDetectionRun {
+				chrootPatchBody = "\n" + buildArcDindChrootConfigPatchBodyBash()
+			} else {
+				chrootPatchBody = "\n" + buildArcDindChrootConfigPatchBody()
+			}
+		}
 		arcDindPrefixProbe = fmt.Sprintf(`%s=""
 if [[ "${DOCKER_HOST:-}" =~ %s ]]; then
-  %s="%s"
+  %s="%s"%s
 fi`,
 			awfArcDindPrefixArgsVarName,
 			awfArcDindDockerHostRegex,
 			awfArcDindPrefixArgsVarName,
-			awfArcDindHostPathPrefixFlag)
+			awfArcDindHostPathPrefixFlag,
+			chrootPatchBody)
 		arcDindPrefixArgsRef = fmt.Sprintf("${%s}", awfArcDindPrefixArgsVarName)
 	}
 	toolCacheMountProbe := fmt.Sprintf(`%s=""
-GH_AW_TOOL_CACHE="${RUNNER_TOOL_CACHE:-/opt/hostedtoolcache}"
+GH_AW_TOOL_CACHE="${RUNNER_TOOL_CACHE:?RUNNER_TOOL_CACHE must be set}"
 if [ -d "$GH_AW_TOOL_CACHE" ]; then
   if [[ "$GH_AW_TOOL_CACHE" != /opt/* ]]; then
     %s="$GH_AW_TOOL_CACHE:$GH_AW_TOOL_CACHE:ro"
   fi
-elif [ -d "/home/runner/work/_tool" ]; then
-  %s="/home/runner/work/_tool:/home/runner/work/_tool:ro"
 fi`,
-		awfToolCacheMountVarName,
 		awfToolCacheMountVarName,
 		awfToolCacheMountVarName,
 	)
@@ -269,7 +268,7 @@ fi`,
 	// Build the expandable args string for args that need shell variable expansion.
 	// These MUST be appended as raw (unescaped) strings because single-quoting would
 	// prevent the runner's shell from expanding ${GITHUB_WORKSPACE} and ${RUNNER_TEMP}.
-	ghAwDir := "${RUNNER_TEMP}/gh-aw"
+	ghAwDir := constants.GhAwRootDirShell
 	expandableArgs := fmt.Sprintf(
 		`--container-workdir "${GITHUB_WORKSPACE}" --mount "%s:%s:ro" --mount "%s:/host%s:ro"`,
 		ghAwDir, ghAwDir, ghAwDir, ghAwDir,
@@ -363,7 +362,7 @@ fi`,
 	// is mounted :ro above; this child mount overrides access for the staging subdirectory only.
 	// The staging directory must already exist on the host (created in Generate Safe Outputs Config step).
 	if config.WorkflowData != nil && config.WorkflowData.SafeOutputs != nil && config.WorkflowData.SafeOutputs.UploadArtifact != nil {
-		stagingDir := "${RUNNER_TEMP}/gh-aw/safeoutputs/upload-artifacts"
+		stagingDir := SafeOutputsUploadArtifactsDir
 		expandableArgs += fmt.Sprintf(` --mount "%s:%s:rw"`, stagingDir, stagingDir)
 		awfHelpersLog.Print("Added read-write mount for upload_artifact staging directory")
 	}
@@ -396,6 +395,18 @@ fi`,
 	// Build the complete command with proper formatting.
 	// configFileSetup (if non-empty) writes the AWF config JSON immediately before the
 	// AWF invocation so the file is present when AWF parses --config.
+	//
+	// shellcheck directive rationale:
+	//   - SC1003 is expected because this generated block intentionally contains GitHub
+	//     expression literals (for example ${{ job.services.<id>.ports['<port>'] }})
+	//     that include single quotes and must survive into runtime unchanged.
+	//   - SC2086 is expected because a subset of AWF arguments are intentionally emitted
+	//     as expandable shell fragments (for example ${GH_AW_TOOL_CACHE_MOUNT:+...} and
+	//     ${GH_AW_DOCKER_HOST_PATH_PREFIX_ARGS}). These fragments are produced by trusted
+	//     compiler-owned probes above and are not user-provided free-form shell input.
+	//
+	// We keep normal quoting for all user-controlled values via shellEscapeArg/shellJoinArgs
+	// and scope this suppression to the generated AWF invocation line only.
 	var command string
 	if config.PathSetup != "" && configFileSetup != "" {
 		command = fmt.Sprintf(`set -o pipefail
@@ -407,7 +418,7 @@ fi`,
 %s
 %s
 %s
-# shellcheck disable=SC1003
+%s
 %s %s %s %s %s %s \
   -- %s 2>&1 | tee -a %s`,
 			writeAgentCLIStartMs,
@@ -418,6 +429,7 @@ fi`,
 			arcDindDockerHostProbe,
 			arcDindPrefixProbe,
 			toolCacheMountProbe,
+			awfShellcheckDirective,
 			awfCommand,
 			expandableArgs,
 			toolCacheMountRef,
@@ -436,7 +448,7 @@ fi`,
 %s
 %s
 %s
-# shellcheck disable=SC1003
+%s
 %s %s %s %s %s %s \
   -- %s 2>&1 | tee -a %s`,
 			writeAgentCLIStartMs,
@@ -446,6 +458,7 @@ fi`,
 			arcDindDockerHostProbe,
 			arcDindPrefixProbe,
 			toolCacheMountProbe,
+			awfShellcheckDirective,
 			awfCommand,
 			expandableArgs,
 			toolCacheMountRef,
@@ -463,7 +476,7 @@ fi`,
 %s
 %s
 %s
-# shellcheck disable=SC1003
+%s
 %s %s %s %s %s %s \
   -- %s 2>&1 | tee -a %s`,
 			writeAgentCLIStartMs,
@@ -473,6 +486,7 @@ fi`,
 			arcDindDockerHostProbe,
 			arcDindPrefixProbe,
 			toolCacheMountProbe,
+			awfShellcheckDirective,
 			awfCommand,
 			expandableArgs,
 			toolCacheMountRef,
@@ -489,7 +503,7 @@ fi`,
 %s
 %s
 %s
-# shellcheck disable=SC1003
+%s
 %s %s %s %s %s %s \
   -- %s 2>&1 | tee -a %s`,
 			writeAgentCLIStartMs,
@@ -498,6 +512,7 @@ fi`,
 			arcDindDockerHostProbe,
 			arcDindPrefixProbe,
 			toolCacheMountProbe,
+			awfShellcheckDirective,
 			awfCommand,
 			expandableArgs,
 			toolCacheMountRef,
@@ -596,25 +611,29 @@ func BuildAWFArgs(config AWFCommandConfig) []string {
 		awfHelpersLog.Print("Added --diagnostic-logs because awf-diagnostic-logs feature flag is enabled")
 	}
 
-	// Always add --enable-host-access: needed for the API proxy sidecar
-	// (to reach host.docker.internal:<port>) and for MCP gateway communication
-	awfArgs = append(awfArgs, "--enable-host-access")
-	awfHelpersLog.Print("Added --enable-host-access for API proxy and MCP gateway")
-
-	// AWF's --enable-host-access defaults to ports 80,443. The MCP gateway now
-	// listens on port 8080 (non-privileged), so we must explicitly allow it
-	// when AWF supports --allow-host-ports.
-	if awfSupportsAllowHostPorts(firewallConfig) {
-		mcpGatewayPort := int(DefaultMCPGatewayPort)
-		if config.WorkflowData != nil && config.WorkflowData.SandboxConfig != nil &&
-			config.WorkflowData.SandboxConfig.MCP != nil && config.WorkflowData.SandboxConfig.MCP.Port > 0 {
-			mcpGatewayPort = config.WorkflowData.SandboxConfig.MCP.Port
-		}
-		hostPorts := fmt.Sprintf("80,443,%d", mcpGatewayPort)
-		awfArgs = append(awfArgs, "--allow-host-ports", hostPorts)
-		awfHelpersLog.Printf("Added --allow-host-ports %s for MCP gateway access", hostPorts)
+	if isAWFNetworkIsolationEnabled(config.WorkflowData) {
+		awfHelpersLog.Print("Skipping host-access flags: sandbox.agent.network-isolation is enabled")
 	} else {
-		awfHelpersLog.Printf("Skipping --allow-host-ports: AWF version %q requires at least %s", getAWFImageTag(firewallConfig), constants.AWFAllowHostPortsMinVersion)
+		// Always add --enable-host-access: needed for the API proxy sidecar
+		// (to reach host.docker.internal:<port>) and for MCP gateway communication
+		awfArgs = append(awfArgs, "--enable-host-access")
+		awfHelpersLog.Print("Added --enable-host-access for API proxy and MCP gateway")
+
+		// AWF's --enable-host-access defaults to ports 80,443. The MCP gateway now
+		// listens on port 8080 (non-privileged), so we must explicitly allow it
+		// when AWF supports --allow-host-ports.
+		if awfSupportsAllowHostPorts(firewallConfig) {
+			mcpGatewayPort := int(DefaultMCPGatewayPort)
+			if config.WorkflowData != nil && config.WorkflowData.SandboxConfig != nil &&
+				config.WorkflowData.SandboxConfig.MCP != nil && config.WorkflowData.SandboxConfig.MCP.Port > 0 {
+				mcpGatewayPort = config.WorkflowData.SandboxConfig.MCP.Port
+			}
+			hostPorts := fmt.Sprintf("80,443,%d", mcpGatewayPort)
+			awfArgs = append(awfArgs, "--allow-host-ports", hostPorts)
+			awfHelpersLog.Printf("Added --allow-host-ports %s for MCP gateway access", hostPorts)
+		} else {
+			awfHelpersLog.Printf("Skipping --allow-host-ports: AWF version %q requires at least %s", getAWFImageTag(firewallConfig), constants.AWFAllowHostPortsMinVersion)
+		}
 	}
 
 	// Skip pulling images since they are pre-downloaded
@@ -626,8 +645,12 @@ func BuildAWFArgs(config AWFCommandConfig) []string {
 	// (firewall v0.25.17+).
 	if isGitHubCLIModeEnabled(config.WorkflowData) {
 		if awfSupportsCliProxy(firewallConfig) {
-			awfArgs = append(awfArgs, "--difc-proxy-host", "host.docker.internal:18443")
-			awfArgs = append(awfArgs, "--difc-proxy-ca-cert", "/tmp/gh-aw/difc-proxy-tls/ca.crt")
+			difcProxyHost := "host.docker.internal:18443"
+			if isAWFNetworkIsolationEnabled(config.WorkflowData) {
+				difcProxyHost = "awmg-cli-proxy:18443"
+			}
+			awfArgs = append(awfArgs, "--difc-proxy-host", difcProxyHost)
+			awfArgs = append(awfArgs, "--difc-proxy-ca-cert", constants.TmpDIFCProxyTLSCACert)
 			awfHelpersLog.Print("Added --difc-proxy-host and --difc-proxy-ca-cert for CLI proxy sidecar")
 		} else {
 			awfHelpersLog.Printf("Skipping CLI proxy flags: AWF version %q is older than minimum %s", getAWFImageTag(firewallConfig), constants.AWFCliProxyMinVersion)
@@ -794,12 +817,14 @@ func WrapCommandInShell(command string) string {
 //   - engine.env var names whose values contain ${{ secrets.* }}
 //   - agent.env var names whose values contain ${{ secrets.* }}
 func ComputeAWFExcludeEnvVarNames(workflowData *WorkflowData, coreSecretVarNames []string) []string {
-	seen := make(map[string]bool)
+	seen := make(map[string]struct {
+	})
 	var names []string
 
 	addUnique := func(name string) {
-		if !seen[name] {
-			seen[name] = true
+		if !setutil.Contains(seen, name) {
+			seen[name] = struct {
+			}{}
 			names = append(names, name)
 		}
 	}
@@ -928,4 +953,51 @@ func awfSupportsDockerHostPathPrefix(firewallConfig *FirewallConfig) bool {
 // apiProxy.enableTokenSteering.
 func awfSupportsTokenSteering(firewallConfig *FirewallConfig) bool {
 	return awfVersionAtLeast(firewallConfig, constants.AWFTokenSteeringMinVersion)
+}
+
+// awfSupportsChrootConfig returns true when the effective AWF version supports
+// chroot.binariesSourcePath and chroot.identity.* in the config file (AWF v0.27.1+).
+func awfSupportsChrootConfig(firewallConfig *FirewallConfig) bool {
+	return awfVersionAtLeast(firewallConfig, constants.AWFChrootConfigMinVersion)
+}
+
+// buildArcDindChrootConfigPatchBody returns the Python heredoc that patches the AWF
+// config file with chroot.binariesSourcePath and chroot.identity.*. It is designed to be
+// embedded inside a bash if-block that already guards on DOCKER_HOST=tcp://...
+//
+// The Python is intentionally kept compact to minimise script size and stay within
+// GitHub Actions' 21 KB per-step expression limit.
+// Both config paths are updated: ${RUNNER_TEMP}/gh-aw/awf-config.json (read by AWF) and
+// /tmp/gh-aw/awf-config.json (used by the unified agent artifact upload).
+func buildArcDindChrootConfigPatchBody() string {
+	return fmt.Sprintf(`  python3 - <<'PY'
+import json,os,subprocess as sp
+from pathlib import Path
+try:
+ p=Path(os.environ["RUNNER_TEMP"])/"gh-aw"/"awf-config.json"
+ c=json.loads(p.read_text())
+ c["chroot"]={"binariesSourcePath":"%s","identity":{"user":sp.check_output(["id","-un"],text=True).strip(),"uid":int(sp.check_output(["id","-u"],text=True)),"gid":int(sp.check_output(["id","-g"],text=True)),"home":"%s"}}
+ out=json.dumps(c,separators=(",",":"),ensure_ascii=False)+"\n"
+ p.write_text(out)
+ Path("%s/awf-config.json").write_text(out)
+except Exception as e:
+ raise SystemExit(f"chroot config patch failed: {e}") from e
+PY`, awfArcDindChrootBinariesSourcePath, awfArcDindChrootIdentityHome, awfArcDindChrootBinariesSourcePath)
+}
+
+// buildArcDindChrootConfigPatchBodyBash returns bash commands (using jq) that patch the AWF
+// config file with chroot.binariesSourcePath and chroot.identity.*. This is the bash
+// equivalent of buildArcDindChrootConfigPatchBody, used for detection runs where Python
+// must not be injected.
+// Both config paths are updated: ${RUNNER_TEMP}/gh-aw/awf-config.json (read by AWF) and
+// /tmp/gh-aw/awf-config.json (used by the unified agent artifact upload).
+func buildArcDindChrootConfigPatchBodyBash() string {
+	return fmt.Sprintf(
+		`  _GH_AW_CHROOT_JSON=$(jq -c --arg src %s --arg user "$(id -un)" --argjson uid "$(id -u)" --argjson gid "$(id -g)" --arg home %s '.chroot={"binariesSourcePath":$src,"identity":{"user":$user,"uid":$uid,"gid":$gid,"home":$home}}' "${RUNNER_TEMP}/gh-aw/awf-config.json") || { echo "chroot config patch failed" >&2; exit 1; }
+  printf '%%s\n' "$_GH_AW_CHROOT_JSON" > "${RUNNER_TEMP}/gh-aw/awf-config.json"
+  printf '%%s\n' "$_GH_AW_CHROOT_JSON" > "%s/awf-config.json"`,
+		awfArcDindChrootBinariesSourcePath,
+		awfArcDindChrootIdentityHome,
+		awfArcDindChrootBinariesSourcePath,
+	)
 }

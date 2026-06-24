@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "🧪"
 name: Smoke Create Cross-Repo PR
 description: Smoke test validating cross-repo pull request creation in github/gh-aw-side-repo
@@ -63,6 +64,8 @@ safe-outputs:
 timeout-minutes: 10
 imports:
   - shared/otlp.md
+features:
+  gh-aw-detection: true
 ---
 
 # Smoke Test: Cross-Repo Pull Request Creation

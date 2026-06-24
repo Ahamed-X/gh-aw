@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "🦸"
 name: Avenger
 description: Hourly CI fixer — merges origin/main, runs recompile/fmt/lint/test/wasm-golden and creates a PR for any fixable issues. Skips if CI is passing.
@@ -51,7 +52,7 @@ jobs:
       ci_run_id: ${{ steps.ci_check.outputs.ci_run_id }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           persist-credentials: false
       - name: Check last CI workflow run status on main branch
@@ -118,6 +119,8 @@ timeout-minutes: 45
 imports:
   - ../agents/ci-cleaner.agent.md
   - shared/otlp.md
+features:
+  gh-aw-detection: true
 ---
 
 # Avenger — Hourly CI Fixer

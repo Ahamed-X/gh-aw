@@ -12,6 +12,7 @@ import (
 	"github.com/github/gh-aw/pkg/console"
 	"github.com/github/gh-aw/pkg/importinpututil"
 	"github.com/github/gh-aw/pkg/logger"
+	"github.com/github/gh-aw/pkg/setutil"
 )
 
 var expressionExtractionLog = logger.New("workflow:expression_extraction")
@@ -366,12 +367,14 @@ func extractTerminalSubExpressions(content string) []string {
 		return nil
 	}
 
-	seen := make(map[string]bool)
+	seen := make(map[string]struct {
+	})
 	var result []string
 	_ = VisitExpressionTree(tree, func(node *ExpressionNode) error {
 		expr := strings.TrimSpace(node.Expression)
-		if isQualifyingSubExpression(expr) && !seen[expr] {
-			seen[expr] = true
+		if isQualifyingSubExpression(expr) && !setutil.Contains(seen, expr) {
+			seen[expr] = struct {
+			}{}
 			result = append(result, expr)
 		}
 		return nil

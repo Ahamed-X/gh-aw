@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "📊"
 name: Commit Changes Analyzer
 description: Analyzes and provides a comprehensive developer-focused report of all changes in the repository since a specified commit
@@ -16,7 +17,8 @@ permissions:
   pull-requests: read
 max-turns: 100
 engine:
-  id: claude
+  id: pi
+  model: copilot/gpt-5.4
 tools:
   cli-proxy: true
   github:
@@ -36,6 +38,8 @@ imports:
 
 
   - shared/otlp.md
+features:
+  gh-aw-detection: true
 ---
 
 # Commit Changes Analyzer

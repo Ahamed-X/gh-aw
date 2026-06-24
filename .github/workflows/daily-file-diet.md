@@ -1,4 +1,5 @@
 ---
+private: true
 on:
   schedule:
   - cron: daily around 13:00 on weekdays
@@ -43,6 +44,8 @@ tools:
     toolsets:
     - default
 tracker-id: daily-file-diet
+features:
+  gh-aw-detection: true
 ---
 
 {{#runtime-import? .github/shared-instructions.md}}

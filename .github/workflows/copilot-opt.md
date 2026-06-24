@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "⚡"
 name: Copilot Opt
 description: Analyze Copilot sessions from the last 14 days and create three optimization issues with evidence-backed recommendations
@@ -48,7 +49,8 @@ imports:
   - shared/reporting.md
   - shared/otlp.md
 timeout-minutes: 30
-
+features:
+  gh-aw-detection: true
 ---
 {{#runtime-import? .github/shared-instructions.md}}
 

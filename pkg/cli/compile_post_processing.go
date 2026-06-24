@@ -43,6 +43,7 @@ import (
 
 	"github.com/github/gh-aw/pkg/console"
 	"github.com/github/gh-aw/pkg/logger"
+	"github.com/github/gh-aw/pkg/setutil"
 	"github.com/github/gh-aw/pkg/workflow"
 )
 
@@ -116,11 +117,22 @@ func generateCentralSlashCommandWorkflowWrapper(
 	ctx context.Context,
 	workflowDataList []*workflow.WorkflowData,
 	workflowsDir string,
+	gitRoot string,
 	strict bool,
 ) error {
 	compilePostProcessingLog.Print("Generating centralized slash-command workflow")
 
-	if err := workflow.GenerateCentralSlashCommandWorkflow(ctx, workflowDataList, workflowsDir); err != nil {
+	repoConfig, err := workflow.LoadRepoConfig(gitRoot)
+	if err != nil {
+		if strict {
+			return fmt.Errorf("failed to load repo config: %w", err)
+		}
+		fmt.Fprintln(os.Stderr, console.FormatWarningMessage(fmt.Sprintf(
+			"Failed to load repo config; repo-config flags (e.g. help_command) will use defaults: %v", err)))
+		repoConfig = nil
+	}
+
+	if err := workflow.GenerateCentralSlashCommandWorkflow(ctx, workflowDataList, workflowsDir, repoConfig); err != nil {
 		if strict {
 			return fmt.Errorf("failed to generate centralized slash-command workflow: %w", err)
 		}
@@ -151,9 +163,11 @@ func purgeOrphanedLockFiles(workflowsDir string, expectedLockFiles []string, ver
 	}
 
 	// Build a set of expected lock files
-	expectedLockFileSet := make(map[string]bool)
+	expectedLockFileSet := make(map[string]struct {
+	})
 	for _, expected := range expectedLockFiles {
-		expectedLockFileSet[expected] = true
+		expectedLockFileSet[expected] = struct {
+		}{}
 	}
 
 	// Find lock files that should be deleted (exist but aren't expected)
@@ -163,7 +177,7 @@ func purgeOrphanedLockFiles(workflowsDir string, expectedLockFiles []string, ver
 		if strings.HasSuffix(existing, ".campaign.lock.yml") {
 			continue
 		}
-		if !expectedLockFileSet[existing] {
+		if !setutil.Contains(expectedLockFileSet, existing) {
 			orphanedFiles = append(orphanedFiles, existing)
 		}
 	}
@@ -297,4 +311,32 @@ func pruneStaleActionCacheEntries(compiler *workflow.Compiler, actionCache *work
 	}
 
 	actionCache.PruneStaleGHAWEntries(version, compiler.EffectiveActionsRepo())
+}
+
+// pruneOrphanedActionCacheEntries removes entries from the action cache that were
+// not referenced during the current compilation run. This garbage-collects entries
+// for action versions no longer used by any workflow in the target directory (e.g.
+// old version pins left behind after bumping a `uses:` tag).
+//
+// This is only safe to call after a full-directory compilation — compiling a
+// subset of files would incorrectly prune entries still referenced by other
+// (uncompiled) workflows — and only when there were zero compile errors.
+func pruneOrphanedActionCacheEntries(compiler *workflow.Compiler, actionCache *workflow.ActionCache, errorCount int) {
+	if actionCache == nil {
+		return
+	}
+	if errorCount > 0 {
+		return
+	}
+
+	resolver := compiler.GetSharedActionResolver()
+	if resolver == nil {
+		return
+	}
+
+	usedKeys := resolver.GetUsedCacheKeys()
+	pruned := actionCache.PruneOrphanedEntries(usedKeys)
+	if pruned > 0 {
+		compilePostProcessingLog.Printf("Pruned %d orphaned entries from actions-lock.json", pruned)
+	}
 }

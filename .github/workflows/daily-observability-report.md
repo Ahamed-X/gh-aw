@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "📊"
 description: Daily observability report analyzing logging and telemetry coverage for AWF firewall and MCP Gateway across workflow runs
 on: daily
@@ -29,6 +30,8 @@ imports:
 
 
   - shared/otlp.md
+features:
+  gh-aw-detection: true
 ---
 {{#runtime-import? .github/shared-instructions.md}}
 
@@ -70,7 +73,8 @@ Using `count: 30` gives a recent, representative cross-workflow sample without f
   "workflow_name": "",
   "count": 30,
   "start_date": "-7d",
-  "parse": true
+  "parse": true,
+  "artifacts": ["usage", "agent", "detection"]
 }
 ```
 
@@ -87,7 +91,8 @@ Only if the broad fetch is missing an important class of run (for example, no re
   "workflow_name": "workflow-name",
   "count": 100,
   "start_date": "-7d",
-  "parse": true
+  "parse": true,
+  "artifacts": ["usage", "agent", "detection"]
 }
 ```
 

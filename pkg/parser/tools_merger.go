@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/github/gh-aw/pkg/logger"
+	"github.com/github/gh-aw/pkg/setutil"
 )
 
 var toolsMergerLog = logger.New("parser:tools_merger")
@@ -184,15 +185,17 @@ func mergeAllowedSubfieldIfPresent(existingMap, newMap map[string]any) (map[stri
 func mergeAllowedArrays(existing, new any) []any {
 	toolsMergerLog.Print("Merging allowed arrays")
 	var result []any
-	seen := make(map[string]bool)
+	seen := make(map[string]struct {
+	})
 
 	// Add existing items
 	if existingSlice, ok := existing.([]any); ok {
 		for _, item := range existingSlice {
 			if str, ok := item.(string); ok {
-				if !seen[str] {
+				if !setutil.Contains(seen, str) {
 					result = append(result, str)
-					seen[str] = true
+					seen[str] = struct {
+					}{}
 				}
 			}
 		}
@@ -202,9 +205,10 @@ func mergeAllowedArrays(existing, new any) []any {
 	if newSlice, ok := new.([]any); ok {
 		for _, item := range newSlice {
 			if str, ok := item.(string); ok {
-				if !seen[str] {
+				if !setutil.Contains(seen, str) {
 					result = append(result, str)
-					seen[str] = true
+					seen[str] = struct {
+					}{}
 				}
 			}
 		}

@@ -34,6 +34,7 @@ const fs = require("fs");
 const http = require("http");
 const path = require("path");
 const { withRetry } = require("./error_recovery.cjs");
+const { lstatGuard } = require("./symlink_guard.cjs");
 
 // ---------------------------------------------------------------------------
 // Timing helpers
@@ -198,8 +199,7 @@ function httpGet(url, timeoutMs) {
  */
 function assertNotSymlink(p) {
   try {
-    const stat = fs.lstatSync(p);
-    if (stat.isSymbolicLink()) {
+    if (lstatGuard(p) === null) {
       core.error(`ERROR: ${p} is a symlink — possible symlink attack, aborting`);
       process.exit(1);
     }
@@ -411,6 +411,21 @@ async function main() {
   const logDir = "/tmp/gh-aw/mcp-logs/";
   const outputPath = path.join(configDir, "gateway-output.json");
   const stderrLogPath = "/tmp/gh-aw/mcp-logs/stderr.log";
+
+  // Clean up any stale gateway container from a previous run on this runner.
+  // On persistent self-hosted runners a prior job's gateway container may still
+  // be running and holding the host port, causing "bind: address already in use"
+  // when we try to start the new one.  Force-removing by the well-known container
+  // name is idempotent: docker rm -f exits non-zero when the container doesn't
+  // exist, but the trailing || true (and 2>/dev/null) make the command succeed.
+  core.info("Cleaning up any stale awmg-mcpg container from a previous run...");
+  try {
+    execSync("docker rm -f awmg-mcpg 2>/dev/null && echo 'Removed stale awmg-mcpg container' || true", { stdio: "inherit" });
+  } catch {
+    // Non-fatal: proceed even if the cleanup command itself fails
+    core.info("Could not remove stale awmg-mcpg container (may not exist)");
+  }
+  core.info("");
 
   core.info(`Starting gateway with container: ${dockerCommand}`);
   core.info(`Full docker command: ${dockerCommand}`);

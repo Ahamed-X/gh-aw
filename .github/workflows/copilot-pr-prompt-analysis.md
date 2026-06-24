@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "🔍"
 name: Copilot PR Prompt Pattern Analysis
 description: Analyzes prompt patterns used in Copilot PR interactions to identify common usage patterns and optimization opportunities
@@ -44,7 +45,8 @@ timeout-minutes: 15
 
 tools:
   cli-proxy: true
-
+features:
+  gh-aw-detection: true
 ---
 
 # Copilot PR Prompt Pattern Analysis

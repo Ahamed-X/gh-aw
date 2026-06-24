@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/github/gh-aw/pkg/constants"
+	"github.com/github/gh-aw/pkg/setutil"
 
 	"github.com/github/gh-aw/pkg/stringutil"
 )
@@ -121,12 +122,14 @@ func generateAllSideRepoMaintenanceWorkflows(
 
 	// Track which side-repo maintenance files we (re-)generate so we can identify
 	// and remove stale files from previous runs when target repos are renamed or removed.
-	generatedFiles := make(map[string]bool)
+	generatedFiles := make(map[string]struct {
+	})
 
 	for _, target := range targets {
 		slug := stringutil.SanitizeForFilename(target.Repository)
 		filename := "agentics-maintenance-" + slug + ".yml"
-		generatedFiles[filename] = true
+		generatedFiles[filename] = struct {
+		}{}
 		outPath := filepath.Join(workflowDir, filename)
 
 		maintenanceLog.Printf("Generating side-repo maintenance workflow: %s → %s", target.Repository, filename)
@@ -159,7 +162,7 @@ func generateAllSideRepoMaintenanceWorkflows(
 		if !strings.HasPrefix(name, "agentics-maintenance-") || !strings.HasSuffix(name, ".yml") {
 			continue
 		}
-		if generatedFiles[name] {
+		if setutil.Contains(generatedFiles, name) {
 			continue
 		}
 		stalePath := filepath.Join(workflowDir, name)
@@ -409,7 +412,9 @@ jobs:
 
       - name: Record outputs
         id: record
-        run: echo "run_url=${{ inputs.run_url }}" >> "$GITHUB_OUTPUT"
+        env:
+          GH_AW_RUN_URL: ${{ inputs.run_url }}
+        run: echo "run_url=$GH_AW_RUN_URL" >> "$GITHUB_OUTPUT"
 `)
 
 	// Add create_labels job for workflow_dispatch/workflow_call with operation == 'create_labels'
@@ -513,10 +518,10 @@ jobs:
           ${GH_AW_CMD_PREFIX} logs \
             --repo "${GH_AW_TARGET_REPO_SLUG}" \
             --start-date -1w \
-            --count 100 \
+            --count 500 \
             --output ./.cache/gh-aw/activity-report-logs \
             --format markdown \
-            > ./.cache/gh-aw/activity-report-logs/report.md
+            --report-file ./.cache/gh-aw/activity-report-logs/report.md
 
       - name: Save activity report logs cache
         if: ${{ always() }}

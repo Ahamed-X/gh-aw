@@ -3,6 +3,7 @@
 package workflow
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -251,6 +252,58 @@ func TestExtractYAMLSections_EmptyRunsOnSlimTreatedAsUnset(t *testing.T) {
 	}
 }
 
+// TestExtractYAMLSections_NonEmptyRunsOnSlimRenderedSnippet pins the rendered
+// snippet format that extractYAMLSections stores in WorkflowData.RunsOnSlim for
+// non-empty values. Downstream helpers (indentYAMLLines, formatRunsOnSnippetForInlineValue)
+// depend on these exact forms, so changes to the rendering path are intentional.
+func TestExtractYAMLSections_NonEmptyRunsOnSlimRenderedSnippet(t *testing.T) {
+	compiler := NewCompiler()
+
+	tests := []struct {
+		name            string
+		value           any
+		expectedSnippet string
+	}{
+		{
+			name:            "string value produces plain string snippet",
+			value:           "self-hosted",
+			expectedSnippet: "runs-on: self-hosted",
+		},
+		{
+			// Array branch uses standard yaml.Marshal (no DefaultMarshalOptions),
+			// which produces zero-indented list items.
+			name:            "array value produces zero-indented list snippet",
+			value:           []any{"self-hosted", "ubuntu2404"},
+			expectedSnippet: "runs-on:\n- self-hosted\n- ubuntu2404",
+		},
+		{
+			// Object branch uses DefaultMarshalOptions (yaml.Indent(2)), so
+			// map continuation lines carry exactly 2-space indentation.
+			// formatRunsOnSnippetForInlineValue's TrimPrefix("  ") and
+			// indentYAMLLines rely on this exact form.
+			name: "group+labels object produces 2-space-indented map snippet",
+			value: map[string]any{
+				"group":  "runner-group",
+				"labels": []any{"ubuntu2404", "x64"},
+			},
+			expectedSnippet: "runs-on:\n  group: runner-group\n  labels:\n  - ubuntu2404\n  - x64",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			workflowData := &WorkflowData{}
+			frontmatter := map[string]any{
+				"runs-on-slim": tt.value,
+			}
+
+			compiler.extractYAMLSections(frontmatter, workflowData)
+
+			assert.Equal(t, tt.expectedSnippet, workflowData.RunsOnSlim)
+		})
+	}
+}
+
 func TestValidateWorkflowEngineSettings_PreservesLegacyErrorOrder(t *testing.T) {
 	compiler := NewCompiler()
 	compiler.strictMode = true
@@ -298,6 +351,41 @@ func TestMergeRawOTLPEndpoints_DedupesAndCountsSources(t *testing.T) {
 	assert.Equal(t, "https://import.example/otlp", mergedEndpoints[2].(map[string]any)["url"])
 }
 
+func TestMergeImportedObservability_MergesResourceAttributesWithMainPrecedence(t *testing.T) {
+	importedObsJSON, err := json.Marshal(map[string]any{
+		"otlp": map[string]any{
+			"resource-attributes": map[string]any{
+				"shared.key":      "from-import",
+				"import.only.key": "import-value",
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	workflowData := &WorkflowData{
+		RawFrontmatter: map[string]any{
+			"observability": map[string]any{
+				"otlp": map[string]any{
+					"resource-attributes": map[string]any{
+						"shared.key":    "from-main",
+						"main.only.key": "main-value",
+					},
+				},
+			},
+		},
+	}
+
+	NewCompiler().mergeImportedObservability(workflowData, string(importedObsJSON))
+
+	obs := workflowData.RawFrontmatter["observability"].(map[string]any)
+	otlp := obs["otlp"].(map[string]any)
+	assert.Equal(t, map[string]string{
+		"shared.key":      "from-main",
+		"main.only.key":   "main-value",
+		"import.only.key": "import-value",
+	}, otlp["resource-attributes"])
+}
+
 func TestBuildMergedEnvSources_MainWorkflowWins(t *testing.T) {
 	mergedEnv := map[string]any{
 		"MAIN_ONLY":   "1",
@@ -343,7 +431,7 @@ func TestProcessAndMergeSteps_NoSteps(t *testing.T) {
 	frontmatter := map[string]any{}
 	importsResult := &parser.ImportsResult{}
 
-	compiler.processAndMergeSteps(frontmatter, workflowData, importsResult)
+	require.NoError(t, compiler.processAndMergeSteps(frontmatter, workflowData, importsResult))
 
 	// CustomSteps should be empty when no steps are defined
 	assert.Empty(t, workflowData.CustomSteps)
@@ -370,7 +458,7 @@ func TestProcessAndMergeSteps_MainStepsOnly(t *testing.T) {
 	}
 	importsResult := &parser.ImportsResult{}
 
-	compiler.processAndMergeSteps(frontmatter, workflowData, importsResult)
+	require.NoError(t, compiler.processAndMergeSteps(frontmatter, workflowData, importsResult))
 
 	// CustomSteps should contain the main workflow steps
 	assert.NotEmpty(t, workflowData.CustomSteps)
@@ -411,7 +499,7 @@ func TestProcessAndMergeSteps_WithImportedSteps(t *testing.T) {
 		MergedSteps: string(importedStepsYAML),
 	}
 
-	compiler.processAndMergeSteps(frontmatter, workflowData, importsResult)
+	require.NoError(t, compiler.processAndMergeSteps(frontmatter, workflowData, importsResult))
 
 	// CustomSteps should contain both imported and main steps
 	assert.NotEmpty(t, workflowData.CustomSteps)
@@ -456,7 +544,7 @@ func TestProcessAndMergeSteps_WithCopilotSetupSteps(t *testing.T) {
 		CopilotSetupSteps: string(copilotSetupYAML),
 	}
 
-	compiler.processAndMergeSteps(frontmatter, workflowData, importsResult)
+	require.NoError(t, compiler.processAndMergeSteps(frontmatter, workflowData, importsResult))
 
 	// CustomSteps should contain both copilot-setup and main steps
 	assert.NotEmpty(t, workflowData.CustomSteps)
@@ -504,7 +592,7 @@ func TestProcessAndMergeSteps_AllStepTypes(t *testing.T) {
 		MergedSteps:       string(otherStepsYAML),
 	}
 
-	compiler.processAndMergeSteps(frontmatter, workflowData, importsResult)
+	require.NoError(t, compiler.processAndMergeSteps(frontmatter, workflowData, importsResult))
 
 	// All steps should be present
 	assert.Contains(t, workflowData.CustomSteps, "Copilot setup")
@@ -527,7 +615,7 @@ func TestProcessAndMergePostSteps_NoPostSteps(t *testing.T) {
 	frontmatter := map[string]any{}
 	importsResult := &parser.ImportsResult{}
 
-	compiler.processAndMergePostSteps(frontmatter, workflowData, importsResult)
+	require.NoError(t, compiler.processAndMergePostSteps(frontmatter, workflowData, importsResult))
 
 	assert.Empty(t, workflowData.PostSteps)
 }
@@ -557,7 +645,7 @@ func TestProcessAndMergePostSteps_WithPostSteps(t *testing.T) {
 	}
 	importsResult := &parser.ImportsResult{}
 
-	compiler.processAndMergePostSteps(frontmatter, workflowData, importsResult)
+	require.NoError(t, compiler.processAndMergePostSteps(frontmatter, workflowData, importsResult))
 
 	assert.NotEmpty(t, workflowData.PostSteps)
 	assert.Contains(t, workflowData.PostSteps, "Cleanup")
@@ -583,7 +671,7 @@ func TestProcessAndMergePostSteps_WithImportedPostSteps(t *testing.T) {
 		MergedPostSteps: string(importedPostStepsYAML),
 	}
 
-	compiler.processAndMergePostSteps(frontmatter, workflowData, importsResult)
+	require.NoError(t, compiler.processAndMergePostSteps(frontmatter, workflowData, importsResult))
 
 	assert.Contains(t, workflowData.PostSteps, "Main post step")
 	assert.Contains(t, workflowData.PostSteps, "Imported post step")
@@ -601,7 +689,7 @@ func TestProcessAndMergePreSteps_NoPreSteps(t *testing.T) {
 	frontmatter := map[string]any{}
 	importsResult := &parser.ImportsResult{}
 
-	compiler.processAndMergePreSteps(frontmatter, workflowData, importsResult)
+	require.NoError(t, compiler.processAndMergePreSteps(frontmatter, workflowData, importsResult))
 
 	assert.Empty(t, workflowData.PreSteps)
 }
@@ -618,7 +706,7 @@ func TestProcessAndMergePreSteps_WithPreSteps(t *testing.T) {
 	}
 	importsResult := &parser.ImportsResult{}
 
-	compiler.processAndMergePreSteps(frontmatter, workflowData, importsResult)
+	require.NoError(t, compiler.processAndMergePreSteps(frontmatter, workflowData, importsResult))
 
 	assert.NotEmpty(t, workflowData.PreSteps)
 	assert.Contains(t, workflowData.PreSteps, "Mint token")
@@ -643,7 +731,7 @@ func TestProcessAndMergePreSteps_WithImportedPreSteps(t *testing.T) {
 		MergedPreSteps: string(importedPreStepsYAML),
 	}
 
-	compiler.processAndMergePreSteps(frontmatter, workflowData, importsResult)
+	require.NoError(t, compiler.processAndMergePreSteps(frontmatter, workflowData, importsResult))
 
 	assert.Contains(t, workflowData.PreSteps, "Main pre step")
 	assert.Contains(t, workflowData.PreSteps, "Imported pre step")
@@ -661,7 +749,7 @@ func TestProcessAndMergePreAgentSteps_NoPreAgentSteps(t *testing.T) {
 	frontmatter := map[string]any{}
 	importsResult := &parser.ImportsResult{}
 
-	compiler.processAndMergePreAgentSteps(frontmatter, workflowData, importsResult)
+	require.NoError(t, compiler.processAndMergePreAgentSteps(frontmatter, workflowData, importsResult))
 
 	assert.Empty(t, workflowData.PreAgentSteps)
 }
@@ -678,7 +766,7 @@ func TestProcessAndMergePreAgentSteps_WithPreAgentSteps(t *testing.T) {
 	}
 	importsResult := &parser.ImportsResult{}
 
-	compiler.processAndMergePreAgentSteps(frontmatter, workflowData, importsResult)
+	require.NoError(t, compiler.processAndMergePreAgentSteps(frontmatter, workflowData, importsResult))
 
 	assert.NotEmpty(t, workflowData.PreAgentSteps)
 	assert.Contains(t, workflowData.PreAgentSteps, "Prepare final context")
@@ -703,7 +791,7 @@ func TestProcessAndMergePreAgentSteps_WithImportedPreAgentSteps(t *testing.T) {
 		MergedPreAgentSteps: string(importedPreAgentStepsYAML),
 	}
 
-	compiler.processAndMergePreAgentSteps(frontmatter, workflowData, importsResult)
+	require.NoError(t, compiler.processAndMergePreAgentSteps(frontmatter, workflowData, importsResult))
 
 	assert.Contains(t, workflowData.PreAgentSteps, "Main pre-agent step")
 	assert.Contains(t, workflowData.PreAgentSteps, "Imported pre-agent step")
@@ -1742,7 +1830,7 @@ func TestProcessAndMergeSteps_InvalidYAML(t *testing.T) {
 	}
 
 	// Should handle gracefully without panicking
-	compiler.processAndMergeSteps(frontmatter, workflowData, importsResult)
+	require.NoError(t, compiler.processAndMergeSteps(frontmatter, workflowData, importsResult))
 
 	// Should still have main steps
 	assert.NotEmpty(t, workflowData.CustomSteps)

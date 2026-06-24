@@ -154,6 +154,12 @@
         }
       },
       "additionalProperties": false
+    },
+    "x-safe-outputs-target-requirements": {
+      "*": {
+        "primary": "discussion_number",
+        "anyOf": ["discussion_number"]
+      }
     }
   },
   {
@@ -230,7 +236,7 @@
         },
         "pull_request_number": {
           "type": ["number", "string"],
-          "description": "Pull request number to close. This is the numeric ID from the GitHub URL (e.g., 432 in github.com/owner/repo/pull/432). If omitted, closes the PR that triggered this workflow (requires a pull_request event trigger).",
+          "description": "Pull request number to close. This is the numeric ID from the GitHub URL (e.g., 432 in github.com/owner/repo/pull/432). If omitted, closes the PR that triggered this workflow (requires a pull_request event trigger). Required when the workflow target is '*' (any PR).",
           "x-synonyms": ["pullRequestNumber"]
         },
         "secrecy": {
@@ -243,6 +249,12 @@
         }
       },
       "additionalProperties": false
+    },
+    "x-safe-outputs-target-requirements": {
+      "*": {
+        "primary": "pull_request_number",
+        "anyOf": ["pull_request_number"]
+      }
     }
   },
   {
@@ -302,6 +314,12 @@
         }
       },
       "additionalProperties": false
+    },
+    "x-safe-outputs-target-requirements": {
+      "*": {
+        "primary": "item_number",
+        "anyOf": ["item_number", "pr_number", "pr"]
+      }
     }
   },
   {
@@ -408,6 +426,12 @@
         }
       },
       "additionalProperties": false
+    },
+    "x-safe-outputs-target-requirements": {
+      "*": {
+        "primary": "pull_request_number",
+        "anyOf": ["pull_request_number"]
+      }
     }
   },
   {
@@ -444,6 +468,12 @@
         }
       },
       "additionalProperties": false
+    },
+    "x-safe-outputs-target-requirements": {
+      "*": {
+        "primary": "pull_request_number",
+        "anyOf": ["pull_request_number"]
+      }
     }
   },
   {
@@ -557,9 +587,37 @@
         "labels": {
           "type": "array",
           "items": {
-            "type": "string"
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "object",
+                "required": ["name"],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "description": "Label name to apply."
+                  },
+                  "rationale": {
+                    "type": "string",
+                    "description": "Optional rationale for the change."
+                  },
+                  "confidence": {
+                    "type": "string",
+                    "enum": ["LOW", "MEDIUM", "HIGH"],
+                    "description": "Optional confidence level for the change."
+                  },
+                  "suggest": {
+                    "type": "boolean",
+                    "description": "When true, route the change through pending human review instead of applying it immediately."
+                  }
+                },
+                "additionalProperties": false
+              }
+            ]
           },
-          "description": "Label names to add (e.g., ['bug', 'priority-high']). Labels must exist in the repository. This field is required \u2014 omitting it will cause a validation error."
+          "description": "Labels to add (e.g., ['bug', 'priority-high']). Each entry can be either a label name string or an object with name plus optional rationale/confidence/suggest intent metadata. Labels must exist in the repository. This field is required \u2014 omitting it will cause a validation error."
         },
         "item_number": {
           "type": ["number", "string"],
@@ -589,9 +647,37 @@
         "labels": {
           "type": "array",
           "items": {
-            "type": "string"
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "object",
+                "required": ["name"],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "description": "Label name to remove."
+                  },
+                  "rationale": {
+                    "type": "string",
+                    "description": "Optional rationale for the change."
+                  },
+                  "confidence": {
+                    "type": "string",
+                    "enum": ["LOW", "MEDIUM", "HIGH"],
+                    "description": "Optional confidence level for the change."
+                  },
+                  "suggest": {
+                    "type": "boolean",
+                    "description": "When true, route the change through pending human review instead of applying it immediately."
+                  }
+                },
+                "additionalProperties": false
+              }
+            ]
           },
-          "description": "Label names to remove (e.g., ['smoke', 'needs-triage']). Non-existent labels are silently skipped."
+          "description": "Labels to remove (e.g., ['smoke', 'needs-triage']). Each entry can be either a label name string or an object with name plus optional rationale/confidence/suggest intent metadata. Non-existent labels are silently skipped."
         },
         "item_number": {
           "type": ["number", "string"],
@@ -821,9 +907,37 @@
         "labels": {
           "type": "array",
           "items": {
-            "type": "string"
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "object",
+                "required": ["name"],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "description": "Label name to apply."
+                  },
+                  "rationale": {
+                    "type": "string",
+                    "description": "Optional rationale for the change."
+                  },
+                  "confidence": {
+                    "type": "string",
+                    "enum": ["LOW", "MEDIUM", "HIGH"],
+                    "description": "Optional confidence level for the change."
+                  },
+                  "suggest": {
+                    "type": "boolean",
+                    "description": "When true, route the change through pending human review instead of applying it immediately."
+                  }
+                },
+                "additionalProperties": false
+              }
+            ]
           },
-          "description": "Replace the issue labels with this list (e.g., ['bug', 'tracking:foo']). Labels must exist in the repository."
+          "description": "Replace the issue labels with this list (e.g., ['bug', 'tracking:foo']). Each entry can be either a label name string or an object with name plus optional rationale/confidence/suggest intent metadata. Labels must exist in the repository."
         },
         "assignees": {
           "type": "array",
@@ -905,6 +1019,12 @@
         }
       },
       "additionalProperties": false
+    },
+    "x-safe-outputs-target-requirements": {
+      "*": {
+        "primary": "pull_request_number",
+        "anyOf": ["pull_request_number", "pr_number", "pr"]
+      }
     }
   },
   {
@@ -977,6 +1097,12 @@
         }
       },
       "additionalProperties": false
+    },
+    "x-safe-outputs-target-requirements": {
+      "*": {
+        "primary": "pull_request_number",
+        "anyOf": ["pull_request_number"]
+      }
     }
   },
   {
@@ -1069,7 +1195,8 @@
         },
         "body": {
           "type": "string",
-          "description": "Release body content in Markdown. For 'replace', this becomes the entire release body. For 'append'/'prepend', this is added with a separator."
+          "description": "Release body content in Markdown. Must be the final intended content \u2014 not a placeholder or test value. For 'replace', this becomes the entire release body. For 'append'/'prepend', this is added with a separator.",
+          "minLength": 20
         },
         "secrecy": {
           "type": "string",
@@ -1212,6 +1339,19 @@
           "description": "Issue type name to set (e.g., \"Bug\", \"Feature\", \"Task\"). Use an empty string \"\" to clear the current issue type.",
           "x-synonyms": ["issueType"]
         },
+        "rationale": {
+          "type": "string",
+          "description": "Optional rationale for the change."
+        },
+        "confidence": {
+          "type": "string",
+          "enum": ["LOW", "MEDIUM", "HIGH"],
+          "description": "Optional confidence level for the change."
+        },
+        "suggest": {
+          "type": "boolean",
+          "description": "When true, route the change through pending human review instead of applying it immediately."
+        },
         "secrecy": {
           "type": "string",
           "description": "Confidentiality level of the message content (e.g., \"public\", \"internal\", \"private\")."
@@ -1249,6 +1389,19 @@
         "value": {
           "type": "string",
           "description": "Field value to set. For single-select fields, this must match an existing option name (e.g., \"P1\" or \"High\"). For date fields, use format: YYYY-MM-DD (for example, 2026-05-08)."
+        },
+        "rationale": {
+          "type": "string",
+          "description": "Optional rationale for the change."
+        },
+        "confidence": {
+          "type": "string",
+          "enum": ["LOW", "MEDIUM", "HIGH"],
+          "description": "Optional confidence level for the change."
+        },
+        "suggest": {
+          "type": "boolean",
+          "description": "When true, route the change through pending human review instead of applying it immediately."
         },
         "secrecy": {
           "type": "string",
@@ -1661,6 +1814,12 @@
         }
       },
       "additionalProperties": false
+    },
+    "x-safe-outputs-target-requirements": {
+      "*": {
+        "primary": "pull_request_number",
+        "anyOf": ["pull_request_number", "pr_number", "pr", "pull_number"]
+      }
     }
   }
 ]

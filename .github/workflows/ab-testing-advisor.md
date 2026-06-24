@@ -1,4 +1,5 @@
 ---
+private: true
 on:
   schedule:
   - cron: daily around 10:00
@@ -34,7 +35,8 @@ description: Daily A/B testing advisor that picks a random agentic workflow with
 emoji: 🧪
 engine:
   bare: true
-  id: copilot
+  id: pi
+  model: copilot/gpt-5.4
 strict: true
 timeout-minutes: 30
 tools:
@@ -70,6 +72,8 @@ tools:
     - default
     - actions
 tracker-id: ab-testing-advisor
+features:
+  gh-aw-detection: true
 ---
 
 {{#runtime-import? .github/shared-instructions.md}}

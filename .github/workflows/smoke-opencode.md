@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "🧪"
 description: Smoke test workflow that validates OpenCode engine functionality
 on:
@@ -55,7 +56,8 @@ safe-outputs:
       run-success: "🚀 [{workflow_name}]({run_url}) **MISSION COMPLETE!** OpenCode delivered. 🔥"
       run-failure: "⚠️ [{workflow_name}]({run_url}) {status}. OpenCode encountered unexpected challenges..."
 timeout-minutes: 10
-
+features:
+  gh-aw-detection: true
 ---
 
 # Smoke Test: OpenCode Engine Validation

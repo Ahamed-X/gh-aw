@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "🧪"
 description: Smoke Copilot
 on: 
@@ -148,6 +149,8 @@ strict: false
 experiments:
   caveman: [yes, no]
   subagent_model: [small, large]
+features:
+  gh-aw-detection: true
 
 ---
 
@@ -168,37 +171,21 @@ Talk like a caveman in all your responses and outputs. Use short, broken sentenc
   - `pull_request` event: post the brief PR summary comment, and **skip** the fun discussion follow-up comment.
   - non-`pull_request` event: **skip** the PR summary comment and post the fun discussion follow-up comment.
 
-## Tool Access Overview
-
-This workflow uses `cli-proxy: true`. The following MCP servers are **NOT available as MCP tools** — they are mounted exclusively as **shell CLI commands** (see `<mcp-clis>` section above). You **must** use them via the `bash` tool:
-
-- **`playwright`** — installed as `@playwright/cli`, use `playwright-cli <command>` in bash (e.g. `playwright-cli open https://github.com`, `playwright-cli screenshot`)
-- **`serena`** — use `serena <tool> [--param value...]` in bash (e.g. `serena activate_project --path ...`)
-- **`agenticworkflows`** — use `agenticworkflows <tool> [--param value...]` in bash
-- **`safeoutputs`** — use `safeoutputs <tool> [--param value...]` in bash (e.g. `safeoutputs add_comment --body "..."`)
-- **`mcpscripts`** — use `mcpscripts <tool> [--param value...]` in bash (e.g. `mcpscripts mcpscripts-gh --args "..."`)
-
-The `github` MCP server is **NOT** CLI-mounted — it remains available as a normal MCP tool.
-
-Run `<server> --help` to list all available tools for a server, or `<server> <tool> --help` for detailed parameter info.
-
-These are **not** MCP protocol tools — they are bash executables. Call them with the `bash` tool only.
-
 ## Test Requirements
 
 Run these checks and mark each as ✅/❌:
 
-1. GitHub MCP: review 2 merged PRs in `${{ github.repository }}`.
+1. `github` tool (configured with `mode: gh-proxy`): review 2 merged PRs in `${{ github.repository }}`.
 2. `mcpscripts-gh`: query 2 PRs using `pr list --repo ${{ github.repository }} --limit 2 --json number,title,author`.
 3. Serena CLI (bash only): run `serena activate_project --path ${{ github.workspace }}`, then `serena find_symbol --name_path <symbol>` and confirm at least 3 symbols.
 4. Playwright CLI (bash only): run `playwright-cli open https://github.com` then `playwright-cli screenshot`; confirm successful GitHub navigation.
-5. Web fetch tool: fetch `https://github.com` and confirm response contains `GitHub`.
+5. `web-fetch` tool: fetch `https://github.com` and confirm response contains `GitHub`.
 6. File + bash: create `/tmp/gh-aw/agent/smoke-test-copilot-${{ github.run_id }}.txt` with timestamped success text, then `cat` it.
 7. Discussion interaction: get latest discussion with `github-discussion-query` (`limit=1`, `jq=".[0]"`), extract number, then `add_comment` to that discussion.
 8. Build: run `GOCACHE=/tmp/gh-aw/agent/go-cache GOMODCACHE=/tmp/gh-aw/agent/go-mod make build`.
 9. Artifact upload (only if build passes): stage `./gh-aw` at `$RUNNER_TEMP/gh-aw/safeoutputs/upload-artifacts/gh-aw` and call `upload_artifact` with `path: "gh-aw"`.
 10. Discussion create: call `create_discussion` in `announcements` with label `ai-generated`, title `copilot was here`, temp ID `aw_smoke_discussion`.
-11. Workflow dispatch: call `dispatch_workflow` for `haiku-printer` with an original testing/automation haiku.
+11. Workflow dispatch: call `dispatch_workflow` for `haiku-printer` and include `inputs.message` with an original testing/automation haiku (non-empty string).
 12. PR review tools: add 1-2 inline `create_pull_request_review_comment` comments, submit review with event `COMMENT`, then reply to most recent existing review comment ID when available.
 13. Comment memory: append an original 3-line haiku to `/tmp/gh-aw/comment-memory/*.md`.
 14. Sub-agent: use `file-summarizer` on `README.md`.

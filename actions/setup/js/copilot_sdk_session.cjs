@@ -9,8 +9,8 @@
  *
  * Event mapping:
  *   SDK "user.message"            → JSONL "user.message"
- *   SDK "tool.execution_start"    → JSONL "tool.execution_start"  (toolName, mcpServerName)
- *   SDK "tool.execution_complete" → JSONL "tool.execution_complete" (toolName, mcpServerName, success)
+ *   SDK "tool.execution_start"    → JSONL "tool.execution_start"  (toolName, mcpServerName, command?)
+ *   SDK "tool.execution_complete" → JSONL "tool.execution_complete" (toolName, mcpServerName, success, result)
  *   SDK "assistant.message"       → JSONL "assistant.message"     (content)
  *
  * The JSONL file is written to:
@@ -29,12 +29,19 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const { buildCopilotSDKPermissionHandler, getEnvPositiveIntOrDefault, parseMaxToolDenialsLimit, MAX_TOOL_DENIALS_DEFAULT } = require("./copilot_sdk_permissions.cjs");
+const { extractShellCommandFromToolData } = require("./tool_call_details.cjs");
 
 // Default timeout for a single sendAndWait call: 10 minutes.
 // This is intentionally generous — the headless Copilot CLI has its own internal
 // timeouts for individual tool calls and model inference.
 // Override via the COPILOT_SDK_SEND_TIMEOUT_MS environment variable.
 const SDK_SEND_TIMEOUT_MS_DEFAULT = 10 * 60 * 1000;
+
+// Pattern matching the SDK idle-timeout error emitted when sendAndWait reaches its
+// deadline waiting for the session.idle event.  This matches the message format
+// "Timeout after <N>ms waiting for session.idle" produced by the Copilot SDK.
+// Keep in sync with SDK_SESSION_IDLE_TIMEOUT_PATTERN in copilot_harness.cjs.
+const SDK_IDLE_TIMEOUT_PATTERN = /Timeout after \d+ms waiting for session\.idle/;
 
 /**
  * Extract the prompt text from a resolved args array.
@@ -82,10 +89,11 @@ function extractPromptFromArgs(args) {
  *     RuntimeConnection: typeof import("@github/copilot-sdk").RuntimeConnection,
  *     approveAll: typeof import("@github/copilot-sdk").approveAll
  *   },
+ *   sessionStateBaseDir?: string,
  * }} options
  * @returns {Promise<{exitCode: number, output: string, hasOutput: boolean, durationMs: number}>}
  */
-async function runWithCopilotSDK({ sdkUri, prompt, logger, attempt = 0, model, connectionToken, provider, maxToolDenials, permissionConfig, coreLogger, sdkModule }) {
+async function runWithCopilotSDK({ sdkUri, prompt, logger, attempt = 0, model, connectionToken, provider, maxToolDenials, permissionConfig, coreLogger, sdkModule, sessionStateBaseDir }) {
   // Lazy-require to avoid loading the SDK when it is not needed.
   // The SDK is large and has side-effects on import (worker threads, etc.).
   const { CopilotClient, RuntimeConnection, approveAll } = sdkModule ?? require("@github/copilot-sdk");
@@ -106,7 +114,9 @@ async function runWithCopilotSDK({ sdkUri, prompt, logger, attempt = 0, model, c
 
   // Session state directory — mirrors the target path used by unified_timeline.cjs.
   // /tmp/gh-aw/sandbox/agent/logs/copilot-session-state/{sessionId}/events.jsonl
-  const sessionStateBase = path.join(os.tmpdir(), "gh-aw", "sandbox", "agent", "logs", "copilot-session-state");
+  // GH_AW_SESSION_STATE_BASE_DIR may be set in tests to redirect writes to an isolated directory.
+  const defaultSessionStateBase = path.join(os.tmpdir(), "gh-aw", "sandbox", "agent", "logs", "copilot-session-state");
+  const sessionStateBase = sessionStateBaseDir ?? process.env.GH_AW_SESSION_STATE_BASE_DIR ?? defaultSessionStateBase;
 
   /** @type {ReadonlyArray<NonNullable<import("@github/copilot-sdk").CopilotClientOptions["logLevel"]>>} */
   const VALID_LOG_LEVELS = ["none", "error", "warning", "info", "debug", "all"];
@@ -138,6 +148,13 @@ async function runWithCopilotSDK({ sdkUri, prompt, logger, attempt = 0, model, c
   let toolDenialCount = 0;
   let catastrophicToolDenialsError = null;
   let catastrophicToolDenialsTriggered = false;
+  /**
+   * Map from toolCallId → {toolName, mcpServerName} for enriching tool.execution_complete
+   * events and for tracking in-flight tool calls when the idle-timeout fires.
+   * Declared at function scope so the catch block can check pendingToolCalls.size.
+   * @type {Map<string, {toolName: string, mcpServerName: string}>}
+   */
+  const pendingToolCalls = new Map();
 
   /**
    * Best-effort write of a driver-level event to events.jsonl and stderr.
@@ -190,6 +207,7 @@ async function runWithCopilotSDK({ sdkUri, prompt, logger, attempt = 0, model, c
       coreLogger,
       logger: log,
       onDenied: requestSummary => recordToolDenial(`permission denied: ${requestSummary}`),
+      workspaceRoot: process.env.GITHUB_WORKSPACE,
     });
 
     /** @type {import("@github/copilot-sdk").SessionConfig} */
@@ -209,13 +227,6 @@ async function runWithCopilotSDK({ sdkUri, prompt, logger, attempt = 0, model, c
     // Snapshot to a non-null local for closure-safe writes (JSDoc nullability narrowing).
     const stream = eventsStream;
     log(`serialising SDK events to ${eventsPath}`);
-
-    /**
-     * Map from toolCallId → {toolName, mcpServerName} so that tool.execution_complete
-     * events (which carry no mcpServerName) can be enriched from the matching start event.
-     * @type {Map<string, {toolName: string, mcpServerName: string}>}
-     */
-    const pendingToolCalls = new Map();
 
     /**
      * Write one JSONL entry to the events file and stderr.
@@ -246,10 +257,12 @@ async function runWithCopilotSDK({ sdkUri, prompt, logger, attempt = 0, model, c
           const toolName = event.data?.toolName ?? "unknown";
           const mcpServerName = event.data?.mcpServerName ?? "";
           const toolCallId = event.data?.toolCallId;
+          const command = extractShellCommandFromToolData(event.data);
           if (toolCallId) {
             pendingToolCalls.set(toolCallId, { toolName, mcpServerName });
           }
-          writeEvent("tool.execution_start", { toolName, mcpServerName }, event.timestamp);
+          const eventData = command ? { toolName, mcpServerName, command } : { toolName, mcpServerName };
+          writeEvent("tool.execution_start", eventData, event.timestamp);
           break;
         }
 
@@ -261,9 +274,12 @@ async function runWithCopilotSDK({ sdkUri, prompt, logger, attempt = 0, model, c
           const mcpServerName = pending?.mcpServerName ?? "";
           if (toolCallId) pendingToolCalls.delete(toolCallId);
           const success = event.data?.success ?? !event.data?.error;
+          // Include result.content (concise LLM-facing output) so that the log
+          // parser can render tool output previews from events.jsonl directly.
+          const result = event.data?.result ?? undefined;
           // max-tool-denials intentionally tracks permission denials only.
           // Tool execution failures are still logged, but do not increment the guardrail counter.
-          writeEvent("tool.execution_complete", { toolName, mcpServerName, success }, event.timestamp);
+          writeEvent("tool.execution_complete", { toolName, mcpServerName, success, result }, event.timestamp);
           break;
         }
 
@@ -309,10 +325,24 @@ async function runWithCopilotSDK({ sdkUri, prompt, logger, attempt = 0, model, c
     const durationMs = Date.now() - startTime;
     const failure = catastrophicToolDenialsError ?? (err instanceof Error ? err : new Error(String(err)));
     log(`error: ${failure.message}`);
+
+    // When sendAndWait times out waiting for session.idle but the agent produced
+    // output and all tracked tool calls have already completed, the session work is
+    // done — the SDK simply failed to emit the idle signal.  Treat it as a successful
+    // run so the harness does not classify it as a failure or waste retry attempts.
+    const isIdleTimeout = !catastrophicToolDenialsError && SDK_IDLE_TIMEOUT_PATTERN.test(failure.message);
+    if (isIdleTimeout && hasOutput && pendingToolCalls.size === 0) {
+      log(`warning: SDK idle-timeout with collected output and no pending tool calls — treating as completed`);
+      log(`session completed: hasOutput=${hasOutput} durationMs=${durationMs}`);
+      return { exitCode: 0, output, hasOutput, durationMs };
+    }
+
+    // Preserve any output collected before the error so the harness can use it
+    // for retry decisions and diagnostics.
     return {
       exitCode: 1,
-      output: failure.message,
-      hasOutput: false,
+      output: hasOutput ? output : failure.message,
+      hasOutput,
       durationMs,
     };
   } finally {
@@ -338,4 +368,4 @@ async function runWithCopilotSDK({ sdkUri, prompt, logger, attempt = 0, model, c
   }
 }
 
-module.exports = { SDK_SEND_TIMEOUT_MS_DEFAULT, extractPromptFromArgs, runWithCopilotSDK };
+module.exports = { SDK_SEND_TIMEOUT_MS_DEFAULT, SDK_IDLE_TIMEOUT_PATTERN, extractPromptFromArgs, runWithCopilotSDK };

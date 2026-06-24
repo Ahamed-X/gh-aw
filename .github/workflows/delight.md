@@ -1,4 +1,5 @@
 ---
+private: true
 on:
   schedule:
   - cron: daily
@@ -13,6 +14,7 @@ network:
   allowed:
   - defaults
   - github
+  - proxy.golang.org
 imports:
 - uses: shared/daily-audit-base.md
   with:
@@ -70,6 +72,9 @@ tools:
   - cat docs/src/content/docs/*.mdx
   - cat .github/workflows/*.md
   - cat pkg/*/*.go
+  - awk
+  - sed
+  - shuf
   cli-proxy: true
   github:
     mode: gh-proxy

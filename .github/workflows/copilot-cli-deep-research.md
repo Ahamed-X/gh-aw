@@ -1,4 +1,5 @@
 ---
+private: true
 on:
   schedule:
   - cron: daily
@@ -64,6 +65,8 @@ tools:
     - "*.json"
     - "*.md"
     max-file-size: 204800
+features:
+  gh-aw-detection: true
 ---
 
 # Copilot CLI Deep Research Agent

@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "📝"
 name: Multi-Device Docs Tester
 description: Tests documentation site functionality and responsive design across multiple device form factors
@@ -17,7 +18,8 @@ permissions:
 tracker-id: daily-multi-device-docs-tester
 max-turns: 80  # 10 devices × ~5 turns each + setup/report overhead
 engine:
-  id: claude
+  id: pi
+  model: copilot/gpt-5.4
 strict: true
 timeout-minutes: 30
 runtimes:
@@ -25,6 +27,8 @@ runtimes:
     version: "24"
 tools:
   cli-proxy: true
+  github:
+    mode: gh-proxy
   timeout: 120  # Playwright navigation on Astro dev server can take >60s; increase to 120s
   playwright:
     mode: cli
@@ -114,6 +118,8 @@ pre-agent-steps:
         sleep 3
       done
       echo "Server ready at http://localhost:4321/gh-aw/!"
+features:
+  gh-aw-detection: true
 ---
 
 {{#runtime-import? .github/shared-instructions.md}}

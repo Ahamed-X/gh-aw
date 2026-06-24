@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "⚡"
 description: Daily session-driven workflow optimization using AgentRx trajectory diagnostics
 on:
@@ -47,6 +48,8 @@ imports:
     with:
       title-prefix: "[agentrx-optimizer] "
       expires: 7d
+features:
+  gh-aw-detection: true
 ---
 
 {{#runtime-import? .github/shared-instructions.md}}

@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "🧌"
 name: LintMonster
 description: Daily workflow that runs custom linters, groups findings, and launches up to three Copilot agent sessions to fix lint issues
@@ -12,8 +13,8 @@ permissions:
   pull-requests: read
 tracker-id: lint-monster
 engine:
-  id: copilot
-  model: claude-haiku-4.5
+  id: pi
+  model: copilot/gpt-5.4
 strict: true
 timeout-minutes: 45
 tools:

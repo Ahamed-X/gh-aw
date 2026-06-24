@@ -73,6 +73,12 @@ func (e *CodexEngine) GetModelEnvVarName() string {
 	return ""
 }
 
+// ResolveLLMProvider returns the effective provider for Codex inference.
+// Default is openai, overridable via engine.model-provider.
+func (e *CodexEngine) ResolveLLMProvider(workflowData *WorkflowData) string {
+	return resolveEngineLLMProvider(workflowData, LLMProviderOpenAI)
+}
+
 // GetRequiredSecretNames returns the list of secrets required by the Codex engine
 // This includes CODEX_API_KEY, OPENAI_API_KEY, and optionally MCP_GATEWAY_API_KEY and mcp-scripts secrets
 func (e *CodexEngine) GetRequiredSecretNames(workflowData *WorkflowData) []string {
@@ -132,7 +138,7 @@ func (e *CodexEngine) GetInstallationSteps(workflowData *WorkflowData) []GitHubA
 func (e *CodexEngine) GetDeclaredOutputFiles() []string {
 	// Return the Codex log directory for artifact collection.
 	return []string{
-		"/tmp/gh-aw/mcp-config/logs/",
+		constants.TmpMcpConfigLogsDir,
 	}
 }
 
@@ -384,14 +390,14 @@ mkdir -p "$CODEX_HOME/logs"
 		// we create this file before the agent starts and append it to the real
 		// $GITHUB_STEP_SUMMARY after secret redaction.
 		"GITHUB_STEP_SUMMARY": AgentStepSummaryPath,
-		"GH_AW_PROMPT":        "/tmp/gh-aw/aw-prompts/prompt.txt",
+		"GH_AW_PROMPT":        constants.AwPromptsFile,
 		// Tag the step as a GitHub AW agentic execution for discoverability by agents
 		"GITHUB_AW":        "true",
 		"RUNNER_TEMP":      "${{ runner.temp }}",
-		"GH_AW_MCP_CONFIG": "${{ runner.temp }}/gh-aw/mcp-config/config.toml",
+		"GH_AW_MCP_CONFIG": constants.CodexMcpConfigTomlPath,
 		// Keep Codex runtime state in /tmp/gh-aw because ${RUNNER_TEMP}/gh-aw is
 		// mounted read-only inside the AWF chroot sandbox.
-		"CODEX_HOME": "/tmp/gh-aw/mcp-config",
+		"CODEX_HOME": constants.TmpMcpConfigDir,
 		// Enable verbose RUST_LOG only in debug mode (runner.debug == 1); default to warn to avoid noisy output.
 		"RUST_LOG":                     "${{ runner.debug == 1 && 'trace,hyper_util=info,mio=info,reqwest=info,os_info=info,codex_otel=warn,codex_core=debug,ocodex_exec=debug' || 'warn' }}",
 		"GH_AW_GITHUB_TOKEN":           effectiveGitHubToken,
@@ -586,33 +592,41 @@ func (e *CodexEngine) expandNeutralToolsToCodexToolsFromMap(tools map[string]any
 
 func (e *CodexEngine) getShellEnvironmentPolicyVars(tools map[string]any, mcpTools []string) []string {
 	// Collect all environment variables needed by MCP servers
-	envVars := make(map[string]bool)
+	envVars := make(map[string]struct{})
 
 	// Always include core environment variables
-	envVars["PATH"] = true
-	envVars["HOME"] = true
+	envVars["PATH"] = struct{}{}
+	envVars["HOME"] = struct{}{}
 
 	// Add CODEX_API_KEY for authentication
-	envVars["CODEX_API_KEY"] = true
-	envVars["OPENAI_API_KEY"] = true // Fallback for CODEX_API_KEY
+	envVars["CODEX_API_KEY"] = struct{}{}
+	envVars["OPENAI_API_KEY"] = struct{}{} // Fallback for CODEX_API_KEY
 
 	// Check each MCP tool for required environment variables
 	for _, toolName := range mcpTools {
 		switch toolName {
 		case "github":
 			// GitHub MCP server needs GITHUB_PERSONAL_ACCESS_TOKEN
-			envVars["GITHUB_PERSONAL_ACCESS_TOKEN"] = true
+			envVars["GITHUB_PERSONAL_ACCESS_TOKEN"] = struct {
+			}{}
 		case "agentic-workflows":
 			// Agentic workflows MCP server needs GITHUB_TOKEN
-			envVars["GITHUB_TOKEN"] = true
+			envVars["GITHUB_TOKEN"] = struct {
+			}{}
 		case "safe-outputs":
 			// Safe outputs MCP server needs several environment variables
-			envVars["GH_AW_SAFE_OUTPUTS"] = true
-			envVars["GH_AW_ASSETS_BRANCH"] = true
-			envVars["GH_AW_ASSETS_MAX_SIZE_KB"] = true
-			envVars["GH_AW_ASSETS_ALLOWED_EXTS"] = true
-			envVars["GITHUB_REPOSITORY"] = true
-			envVars["GITHUB_SERVER_URL"] = true
+			envVars["GH_AW_SAFE_OUTPUTS"] = struct {
+			}{}
+			envVars["GH_AW_ASSETS_BRANCH"] = struct {
+			}{}
+			envVars["GH_AW_ASSETS_MAX_SIZE_KB"] = struct {
+			}{}
+			envVars["GH_AW_ASSETS_ALLOWED_EXTS"] = struct {
+			}{}
+			envVars["GITHUB_REPOSITORY"] = struct {
+			}{}
+			envVars["GITHUB_SERVER_URL"] = struct {
+			}{}
 		default:
 			// For custom MCP tools, check if they have env configuration
 			if toolValue, ok := tools[toolName]; ok {
@@ -620,7 +634,8 @@ func (e *CodexEngine) getShellEnvironmentPolicyVars(tools map[string]any, mcpToo
 					// Extract environment variable names from env configuration
 					if env, hasEnv := toolConfig["env"].(map[string]any); hasEnv {
 						for envKey := range env {
-							envVars[envKey] = true
+							envVars[envKey] = struct {
+							}{}
 						}
 					}
 				}

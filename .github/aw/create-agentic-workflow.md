@@ -24,6 +24,7 @@ Load these topic files only when relevant:
 - [visual-regression.md](visual-regression.md) for screenshot comparison workflows
 - [deployment-status.md](deployment-status.md) for external deployment monitoring
 - [charts.md](charts.md) for chart-generation workflows
+- [report.md](report.md) for reporting output structure and recurring report lifecycle
 
 ## Two Modes
 
@@ -80,15 +81,34 @@ Quick decision matrix:
 | Publish weekly stakeholder/product digest | `schedule` | `github` (`gh-proxy`) | `create-issue` (default), `create-discussion` only if explicitly requested |
 
 > **`workflow_run` vs `deployment_status`**: Use `workflow_run` when monitoring another GitHub Actions workflow in the same repository. Use `deployment_status` when an external service (Heroku, Vercel, Fly.io) reports deployment results back to GitHub via the Deployments API. See [deployment-status.md](deployment-status.md) for the full pattern.
+>
+> For `workflow_run`, always scope explicitly: set `workflows:` to named upstream workflow(s), use `types: [completed]`, and gate outcomes with an `if:` guard on `${{ github.event.workflow_run.conclusion }}` (for incident triage, usually `failure`, `timed_out`, `cancelled`, `action_required`) unless the user asked for success reporting.
 
 Use [workflow-patterns.md](workflow-patterns.md) for trigger-selection guidance.
 
 Compact scenario examples:
 
-- **Schema review on PRs**: trigger `pull_request`, read via `github` (`gh-proxy`), publish findings with `add-comment`, call `noop` when schema is unchanged.
-- **Visual regression on UI changes**: trigger `pull_request`, use `playwright` + `cache-memory`, keep writes in `add-comment`.
-- **Deployment incident triage**: use `deployment_status` for external provider failures and `workflow_run` for GitHub Actions failures, publish incident reports via `create-issue`.
-- **Product/stakeholder digest**: use fuzzy `schedule` plus optional `workflow_dispatch`, publish digest with `create-issue`.
+- **Schema/API review on PRs**: trigger `pull_request` with `paths:` scoped to backend contract files (for example `db/migrate/**`, `migrations/**`, `schema/**`, `openapi/**`, `api/**`), read via `github` (`gh-proxy`), publish findings with `add-comment`, call `noop` when contracts are unchanged.
+- **Visual regression on UI changes**: trigger `pull_request`, use only `playwright` + `cache-memory` (no extra tools), keep network minimal (allowlist only target preview/app hosts if required), publish via `add-comment`, call `noop` when UI paths are unchanged.
+- **Deployment incident triage**: use `deployment_status` for external provider failures and `workflow_run` for GitHub Actions failures, publish incident reports via `create-issue`, call `noop` when a failure self-recovers or is duplicate noise.
+- **Product/stakeholder digest**: use fuzzy `schedule` plus optional `workflow_dispatch`, define an explicit window (for example `last 7 full days ending at run start (UTC)`), publish digest with `create-issue`, call `noop` when there are no updates in that window.
+
+Pattern-specific `noop` examples:
+
+- **PR reviewer (`pull_request`)**: `noop` when only docs/metadata changed outside scoped `paths:`.
+- **Failure triage (`workflow_run`)**: `noop` when rerun succeeds, signal is flake-only, or an open incident already exists for the same failure key.
+- **Scheduled digest (`schedule`)**: `noop` when the exact reporting window (for example `since previous successful run`) has zero qualifying updates.
+- **Deployment monitor (`deployment_status`)**: `noop` when non-terminal statuses (`queued`, `in_progress`) arrive without a terminal failure.
+
+For compact prefetch + duplicate suppression patterns in reporting/incident workflows, follow [workflow-patterns.md](workflow-patterns.md) and [report.md](report.md) instead of embedding long inline instructions.
+
+### 2a. Backend review compact guidance
+
+For backend-focused PR automation (schema migrations and API compatibility):
+
+- scope `pull_request.paths` to backend contract indicators instead of whole-repo review
+- instruct the agent to classify changes as additive, backward-compatible, or breaking, then report only actionable risks
+- include explicit `noop` criteria when no migration/API contract files changed
 
 ### 3. Keep permissions read-only
 
@@ -264,6 +284,16 @@ Before finalizing any newly generated workflow, verify:
 - [ ] **Permissions**: agent job remains read-only; no direct write scopes granted
 - [ ] **Network**: access is inferred from repository ecosystem and avoids `network: defaults` alone for install/build/test workflows
 - [ ] **Prompt clarity**: prompt is concise, context-aware, and clearly states expected outputs and stop/no-op behavior
+
+## Generated Workflow Scoping Checklist
+
+Before finalizing any newly generated workflow, verify:
+
+- [ ] **Paths scope**: include `paths:`/`paths-ignore:` when the automation should ignore unrelated files (for backend reviews, include migration/schema/API contract globs)
+- [ ] **Labels scope**: define required labels (for example `label_command` names or PR/issue label filters) when label-based routing is expected
+- [ ] **Workflow-name scope**: for `workflow_run`, explicitly set `workflows:` to named targets and gate conclusions via `if:` on `${{ github.event.workflow_run.conclusion }}` (for incident triage, prefer failure-only outcomes)
+- [ ] **Date-window scope**: for reporting/triage, state the exact window (for example `last 24h`, `since previous run`, `current week`)
+- [ ] **Safe-output write contract**: name which safe output is used for each outcome and when `noop` is required instead of a write
 
 ## Multi-Repository Requests
 

@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "🧪"
 description: Daily test workflow using Claude with custom safe-output job containing choice inputs
 on:
@@ -62,7 +63,8 @@ safe-outputs:
             fi
 imports:
   - shared/otlp.md
-
+features:
+  gh-aw-detection: true
 ---
 
 # Daily Choice Type Test

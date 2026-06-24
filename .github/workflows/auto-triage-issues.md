@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "🔧"
 name: Auto-Triage Issues
 description: Automatically labels new and existing unlabeled issues to improve discoverability and triage efficiency
@@ -16,8 +17,8 @@ permissions:
   issues: read
   copilot-requests: write
 engine:
-  id: copilot
-  model: gpt-5-mini
+  id: pi
+  model: copilot/gpt-5.4
 strict: true
 network:
   allowed:
@@ -58,6 +59,8 @@ safe-outputs:
     max: 1
   noop:
 timeout-minutes: 15
+features:
+  gh-aw-detection: true
 ---
 
 # Auto-Triage Issues Agent 🏷️

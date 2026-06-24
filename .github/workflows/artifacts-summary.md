@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "📦"
 description: Generates a comprehensive summary of GitHub Actions artifacts usage across all workflows in the repository
 on:
@@ -37,6 +38,8 @@ imports:
   - shared/reporting.md
   - shared/safe-output-app.md
   - shared/otlp.md
+features:
+  gh-aw-detection: true
 ---
 
 # Artifacts Summary

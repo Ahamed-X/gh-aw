@@ -30,6 +30,7 @@ import (
 
 	"github.com/github/gh-aw/pkg/console"
 	"github.com/github/gh-aw/pkg/logger"
+	"github.com/github/gh-aw/pkg/setutil"
 	"github.com/github/gh-aw/pkg/stringutil"
 	"github.com/github/gh-aw/pkg/workflow"
 )
@@ -197,12 +198,14 @@ func extractSafeOutputLabels(data *workflow.WorkflowData) []string {
 		return nil
 	}
 
-	seen := make(map[string]bool)
+	seen := make(map[string]struct {
+	})
 	var labels []string
 
 	addLabel := func(label string) {
-		if label != "" && !seen[label] {
-			seen[label] = true
+		if label != "" && !setutil.Contains(seen, label) {
+			seen[label] = struct {
+			}{}
 			labels = append(labels, label)
 		}
 	}

@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "🔒"
 description: Daily security scan that reviews code changes from the last 3 days for suspicious patterns indicating malicious agentic threats
 on:
@@ -30,8 +31,8 @@ imports:
   - shared/otlp.md
 tools:
   cli-proxy: true
-
-
+features:
+  gh-aw-detection: true
 ---
 
 {{#runtime-import? .github/shared-instructions.md}}

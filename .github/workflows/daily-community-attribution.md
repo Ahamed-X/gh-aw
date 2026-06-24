@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "🏆"
 name: Daily Community Attribution Updater
 description: Maintains a live community contributions section in README.md and an all-time Community Contributors wiki page by attributing all community-labeled issues using the five-tier attribution strategy
@@ -286,7 +287,8 @@ steps:
       echo "Data available in $DATA_DIR/:"
       echo "  attribution_by_author.json          — Tier 0-2 issues grouped by author (agent-ready)"
       echo "  readme_community_section_tier012.md — pre-formatted README section (Tier 0-2 only)"
-
+features:
+  gh-aw-detection: true
 ---
 
 # Daily Community Attribution Updater

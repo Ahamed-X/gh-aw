@@ -16,6 +16,7 @@ var safeOutputValidationLog = logger.New("workflow:safe_outputs_validation_confi
 type FieldValidation struct {
 	Required                 bool     `json:"required,omitempty"`
 	Type                     string   `json:"type,omitempty"`
+	TypeHint                 string   `json:"typeHint,omitempty"` // Overrides the type description in error messages (e.g. "GraphQL node ID string")
 	Sanitize                 bool     `json:"sanitize,omitempty"`
 	MaxLength                int      `json:"maxLength,omitempty"`
 	MinLength                int      `json:"minLength,omitempty"`
@@ -46,6 +47,7 @@ const (
 	MaxGitHubTeamSlugLength = 100
 	MinIssueBodyLength      = 20 // Minimum body length for create_issue to prevent placeholder-only submissions
 	MinDiscussionBodyLength = 64 // Minimum body length for create_discussion to prevent placeholder-only submissions
+	MinReleaseBodyLength    = 20 // Minimum body length for update_release to prevent placeholder-only submissions
 )
 
 // ValidationConfig contains all safe output type validation rules
@@ -103,7 +105,7 @@ var ValidationConfig = map[string]TypeValidationConfig{
 	"add_labels": {
 		DefaultMax: 5,
 		Fields: map[string]FieldValidation{
-			"labels":      {Required: true, Type: "array", ItemType: "string", ItemSanitize: true, ItemMaxLength: 128},
+			"labels":      {Required: true, Type: "array"}, // Item-level validation/sanitization handled by JS issue-intent label normalization.
 			"item_number": {IssueNumberOrTemporaryID: true},
 			"repo":        {Type: "string", MaxLength: 256}, // Optional: target repository in format "owner/repo"
 		},
@@ -133,7 +135,10 @@ var ValidationConfig = map[string]TypeValidationConfig{
 		Fields: map[string]FieldValidation{
 			"issue_number": {IssueOrPRNumber: true},
 			"issue_type":   {Required: true, Type: "string", Sanitize: true, MaxLength: 128}, // Empty string clears the type
-			"repo":         {Type: "string", MaxLength: 256},                                 // Optional: target repository in format "owner/repo"
+			"rationale":    {Type: "string", Sanitize: true, MaxLength: 1024},
+			"confidence":   {Type: "string", Enum: []string{"LOW", "MEDIUM", "HIGH"}},
+			"suggest":      {Type: "boolean"},
+			"repo":         {Type: "string", MaxLength: 256}, // Optional: target repository in format "owner/repo"
 		},
 	},
 	"set_issue_field": {
@@ -144,6 +149,9 @@ var ValidationConfig = map[string]TypeValidationConfig{
 			"field_name":    {Type: "string", Sanitize: true, MaxLength: 128},
 			"field_node_id": {Type: "string", MaxLength: 256},
 			"value":         {Required: true, Type: "string", Sanitize: true, MaxLength: 256},
+			"rationale":     {Type: "string", Sanitize: true, MaxLength: 1024},
+			"confidence":    {Type: "string", Enum: []string{"LOW", "MEDIUM", "HIGH"}},
+			"suggest":       {Type: "boolean"},
 			"repo":          {Type: "string", MaxLength: 256}, // Optional: target repository in format "owner/repo"
 		},
 	},
@@ -169,13 +177,13 @@ var ValidationConfig = map[string]TypeValidationConfig{
 	},
 	"update_issue": {
 		DefaultMax:       1,
-		CustomValidation: "requiresOneOf:status,title,body",
+		CustomValidation: "requiresOneOf:status,title,body,labels,assignees,milestone",
 		Fields: map[string]FieldValidation{
 			"status":       {Type: "string", Enum: []string{"open", "closed"}},
 			"title":        {Type: "string", Sanitize: true, MaxLength: 128},
 			"body":         {Type: "string", Sanitize: true, MaxLength: MaxBodyLength},
 			"operation":    {Type: "string", Enum: []string{"replace", "append", "prepend", "replace-island"}},
-			"labels":       {Type: "array", ItemType: "string", ItemSanitize: true, ItemMaxLength: 128},
+			"labels":       {Type: "array"},
 			"assignees":    {Type: "array", ItemType: "string", ItemSanitize: true, ItemMaxLength: MaxGitHubUsernameLength},
 			"milestone":    {OptionalPositiveInteger: true},
 			"issue_number": {IssueOrPRNumber: true},
@@ -231,7 +239,7 @@ var ValidationConfig = map[string]TypeValidationConfig{
 		Fields: map[string]FieldValidation{
 			"body":                {Type: "string", Sanitize: true, MaxLength: MaxBodyLength},
 			"event":               {Type: "string", Enum: []string{"APPROVE", "REQUEST_CHANGES", "COMMENT"}},
-			"pull_request_number": {OptionalPositiveInteger: true},
+			"pull_request_number": {IssueOrPRNumber: true},
 			"repo":                {Type: "string", MaxLength: 256}, // Optional: target repository in format "owner/repo"
 		},
 	},
@@ -284,6 +292,13 @@ var ValidationConfig = map[string]TypeValidationConfig{
 			"repo":                {Type: "string", MaxLength: 256}, // Optional: target repository in format "owner/repo"
 		},
 	},
+	"dispatch_workflow": {
+		DefaultMax: 1,
+		Fields: map[string]FieldValidation{
+			"workflow_name": {Required: true, Type: "string", Sanitize: true, MinLength: 1, MaxLength: 256, Pattern: ".*\\S.*", PatternError: "must not be empty"},
+			"inputs":        {Type: "object"},
+		},
+	},
 	"missing_tool": {
 		DefaultMax: 20,
 		Fields: map[string]FieldValidation{
@@ -297,7 +312,7 @@ var ValidationConfig = map[string]TypeValidationConfig{
 		Fields: map[string]FieldValidation{
 			"tag":       {Type: "string", Sanitize: true, MaxLength: 256},
 			"operation": {Required: true, Type: "string", Enum: []string{"replace", "append", "prepend"}},
-			"body":      {Required: true, Type: "string", Sanitize: true, MaxLength: MaxBodyLength},
+			"body":      {Required: true, Type: "string", Sanitize: true, MaxLength: MaxBodyLength, MinLength: MinReleaseBodyLength},
 		},
 	},
 	"upload_asset": {
@@ -378,9 +393,18 @@ var ValidationConfig = map[string]TypeValidationConfig{
 	"remove_labels": {
 		DefaultMax: 5,
 		Fields: map[string]FieldValidation{
-			"labels":      {Required: true, Type: "array", ItemType: "string", ItemSanitize: true, ItemMaxLength: 128},
+			"labels":      {Required: true, Type: "array"}, // Item-level validation/sanitization handled by JS issue-intent label normalization.
 			"item_number": {IssueNumberOrTemporaryID: true},
 			"repo":        {Type: "string", MaxLength: 256}, // Optional: target repository in format "owner/repo"
+		},
+	},
+	"replace_label": {
+		DefaultMax: 5,
+		Fields: map[string]FieldValidation{
+			"label_to_remove": {Required: true, Type: "string", Sanitize: true, MaxLength: 128},
+			"label_to_add":    {Required: true, Type: "string", Sanitize: true, MaxLength: 128},
+			"item_number":     {IssueNumberOrTemporaryID: true},
+			"repo":            {Type: "string", MaxLength: 256}, // Optional: target repository in format "owner/repo"
 		},
 	},
 	"unassign_from_user": {
@@ -395,7 +419,7 @@ var ValidationConfig = map[string]TypeValidationConfig{
 	"hide_comment": {
 		DefaultMax: 5,
 		Fields: map[string]FieldValidation{
-			"comment_id": {Required: true, Type: "string", MaxLength: 256},
+			"comment_id": {Required: true, Type: "string", MaxLength: 256, TypeHint: "GraphQL node ID string (e.g. 'IC_kwDOABCD123456'); numeric REST comment IDs are accepted but may not resolve for all comment types (e.g. PR review comments)"},
 			"reason":     {Type: "string", Enum: []string{"SPAM", "ABUSE", "OFF_TOPIC", "OUTDATED", "RESOLVED", "LOW_QUALITY"}},
 			"repo":       {Type: "string", MaxLength: 256}, // Optional: target repository in format "owner/repo"
 		},

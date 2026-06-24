@@ -9,6 +9,7 @@ import (
 
 	"github.com/github/gh-aw/pkg/constants"
 	"github.com/github/gh-aw/pkg/logger"
+	"github.com/github/gh-aw/pkg/setutil"
 	"github.com/github/gh-aw/pkg/sliceutil"
 	"github.com/github/gh-aw/pkg/stringutil"
 )
@@ -589,10 +590,12 @@ func (c *Compiler) extractPreActivationCustomFields(jobs map[string]any) ([]stri
 		}
 
 		// Validate that only steps and outputs fields are present
-		allowedFields := map[string]bool{
-			"steps":     true,
-			"outputs":   true,
-			"pre-steps": true, // handled by generic built-in pre-steps insertion in compiler_jobs.go
+		allowedFields := map[string]struct {
+		}{
+			"steps":     {},
+			"outputs":   {},
+			"pre-steps": { // handled by generic built-in pre-steps insertion in compiler_jobs.go
+			},
 		}
 
 		for field := range configMap {
@@ -602,7 +605,7 @@ func (c *Compiler) extractPreActivationCustomFields(jobs map[string]any) ([]stri
 					jobName,
 				)
 			}
-			if !allowedFields[field] {
+			if !setutil.Contains(allowedFields, field) {
 				return nil, nil, fmt.Errorf("jobs.%s: unsupported field '%s' - only 'steps', 'outputs', and 'pre-steps' are allowed", jobName, field)
 			}
 		}

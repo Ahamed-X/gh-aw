@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "🧪"
 description: Smoke test workflow that validates Gemini engine functionality twice daily
 on:
@@ -69,7 +70,6 @@ safe-outputs:
       run-success: "🚀 [{workflow_name}]({run_url}) **MISSION COMPLETE!** Gemini has spoken. ✨"
       run-failure: "⚠️ [{workflow_name}]({run_url}) {status}. Gemini encountered unexpected challenges..."
 timeout-minutes: 10
-
 ---
 
 # Smoke Test: Gemini Engine Validation

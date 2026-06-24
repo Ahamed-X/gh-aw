@@ -9,9 +9,11 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/github/gh-aw/pkg/constants"
-	"github.com/github/gh-aw/pkg/stringutil"
 	"github.com/goccy/go-yaml"
+
+	"github.com/github/gh-aw/pkg/constants"
+	"github.com/github/gh-aw/pkg/setutil"
+	"github.com/github/gh-aw/pkg/stringutil"
 )
 
 // PermissionsValidationResult contains the result of permissions validation
@@ -228,9 +230,11 @@ func formatMissingPermissionsMessage(result *PermissionsValidationResult) string
 		lines = append(lines, "Remove or adjust toolsets that require these permissions:")
 
 		// Get unique toolsets from MissingToolsetDetails
-		toolsetsMap := make(map[string]bool)
+		toolsetsMap := make(map[string]struct {
+		})
 		for toolset := range result.MissingToolsetDetails {
-			toolsetsMap[toolset] = true
+			toolsetsMap[toolset] = struct {
+			}{}
 		}
 		var toolsetsList []string
 		for toolset := range toolsetsMap {
@@ -416,11 +420,12 @@ func ValidatePermissionScopeNames(permissionsYAML string) error {
 	// copilot-requests is valid even though not in GetAllPermissionScopes
 	allScopes = append(allScopes, string(PermissionCopilotRequests))
 	// "all" is a meta-key that is always valid in shorthand contexts
-	validMeta := map[string]bool{
-		"all":       true,
-		"read-all":  true,
-		"write-all": true,
-		"none":      true,
+	validMeta := map[string]struct {
+	}{
+		"all":       {},
+		"read-all":  {},
+		"write-all": {},
+		"none":      {},
 	}
 
 	// Strip optional "permissions:" prefix so we can parse just the map content
@@ -443,7 +448,7 @@ func ValidatePermissionScopeNames(permissionsYAML string) error {
 	}
 
 	for scopeKey := range permsMap {
-		if validMeta[scopeKey] {
+		if setutil.Contains(validMeta, scopeKey) {
 			continue
 		}
 		if _, ok := validPermissionScopes[scopeKey]; ok {

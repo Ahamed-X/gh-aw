@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "🦛"
 name: Daily Hippo Learn
 description: Runs hippo-memory's learn and sleep commands daily to extract lessons from git commits, consolidate the memory store, and suggest actionable improvements to the team
@@ -17,7 +18,8 @@ permissions:
   copilot-requests: write
 tracker-id: daily-hippo-learn
 engine:
-  id: copilot
+  id: pi
+  model: copilot/gpt-5.4
   bare: true
 
 timeout-minutes: 30
@@ -54,6 +56,8 @@ imports:
   - shared/hippo-memory.md
   - shared/reporting.md
   - shared/otlp.md
+features:
+  gh-aw-detection: true
 ---
 
 {{#runtime-import? .github/shared-instructions.md}}

@@ -56,6 +56,7 @@ import (
 	"strings"
 
 	"github.com/github/gh-aw/pkg/logger"
+	"github.com/github/gh-aw/pkg/setutil"
 )
 
 var toolsParserLog = logger.New("workflow:tools_parser")
@@ -154,26 +155,27 @@ func NewTools(toolsMap map[string]any) *Tools {
 	}
 
 	// Extract custom MCP tools (anything not in the known list)
-	knownTools := map[string]bool{
-		"github":            true,
-		"bash":              true,
-		"web-fetch":         true,
-		"web-search":        true,
-		"edit":              true,
-		"playwright":        true,
-		"agentic-workflows": true,
-		"cache-memory":      true,
-		"comment-memory":    true,
-		"repo-memory":       true,
-		"safety-prompt":     true,
-		"timeout":           true,
-		"startup-timeout":   true,
-		"cli-proxy":         true,
+	knownTools := map[string]struct {
+	}{
+		"github":            {},
+		"bash":              {},
+		"web-fetch":         {},
+		"web-search":        {},
+		"edit":              {},
+		"playwright":        {},
+		"agentic-workflows": {},
+		"cache-memory":      {},
+		"comment-memory":    {},
+		"repo-memory":       {},
+		"safety-prompt":     {},
+		"timeout":           {},
+		"startup-timeout":   {},
+		"cli-proxy":         {},
 	}
 
 	customCount := 0
 	for name, config := range toolsMap {
-		if !knownTools[name] {
+		if !setutil.Contains(knownTools, name) {
 			tools.Custom[name] = parseMCPServerConfig(config)
 			customCount++
 		}
@@ -698,24 +700,25 @@ func parseMCPServerConfig(val any) MCPServerConfig {
 	}
 
 	// Store any unknown fields in CustomFields
-	knownFields := map[string]bool{
-		"command":        true,
-		"args":           true,
-		"env":            true,
-		"mode":           true,
-		"type":           true,
-		"version":        true,
-		"toolsets":       true,
-		"url":            true,
-		"headers":        true,
-		"container":      true,
-		"entrypoint":     true,
-		"entrypointArgs": true,
-		"mounts":         true,
+	knownFields := map[string]struct {
+	}{
+		"command":        {},
+		"args":           {},
+		"env":            {},
+		"mode":           {},
+		"type":           {},
+		"version":        {},
+		"toolsets":       {},
+		"url":            {},
+		"headers":        {},
+		"container":      {},
+		"entrypoint":     {},
+		"entrypointArgs": {},
+		"mounts":         {},
 	}
 
 	for key, value := range configMap {
-		if !knownFields[key] {
+		if !setutil.Contains(knownFields, key) {
 			config.CustomFields[key] = value
 		}
 	}

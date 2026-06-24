@@ -433,7 +433,7 @@ func compileAllFilesInDirectory(
 	}
 
 	// Post-processing
-	if err := runPostProcessingForDirectory(ctx, compiler, workflowDataList, config, workflowsDir, gitRoot, successCount); err != nil {
+	if err := runPostProcessingForDirectory(ctx, compiler, workflowDataList, config, workflowsDir, gitRoot, successCount, errorCount); err != nil {
 		return workflowDataList, err
 	}
 
@@ -508,22 +508,15 @@ func runPostProcessing(
 	// Update .gitattributes (errors are non-fatal)
 	_ = updateGitAttributes(successCount, actionCache, config.Verbose)
 
-	// Generate Dependabot manifests if requested
+	// Generate Dependabot manifests and reconcile compiler-managed ignore entries if requested.
 	if config.Dependabot && !config.NoEmit {
-		gitRoot, err := gitutil.FindGitRoot()
-		if err == nil {
+		if gitRoot, err := gitutil.FindGitRoot(); err == nil {
 			absWorkflowDir := filepath.Join(gitRoot, config.WorkflowDir)
 			if err := generateDependabotManifestsWrapper(compiler, workflowDataList, absWorkflowDir, config.ForceOverwrite, config.Strict); err != nil {
 				if config.Strict {
 					return err
 				}
 			}
-		}
-	}
-
-	// Reconcile compiler-managed Dependabot ignore entries for compiler-emitted action refs.
-	if !config.NoEmit {
-		if gitRoot, err := gitutil.FindGitRoot(); err == nil {
 			if err := compiler.ReconcileManagedDependabotIgnoresInRepo(gitRoot); err != nil {
 				if config.Strict {
 					return err
@@ -558,6 +551,7 @@ func runPostProcessingForDirectory(
 	workflowsDir string,
 	gitRoot string,
 	successCount int,
+	errorCount int,
 ) error {
 	// Get action cache
 	actionCache := compiler.GetSharedActionCache()
@@ -576,7 +570,7 @@ func runPostProcessingForDirectory(
 	}
 
 	// Reconcile compiler-managed Dependabot ignore entries for compiler-emitted action refs.
-	if !config.NoEmit {
+	if config.Dependabot && !config.NoEmit {
 		if err := compiler.ReconcileManagedDependabotIgnoresInRepo(gitRoot); err != nil {
 			if config.Strict {
 				return err
@@ -595,7 +589,7 @@ func runPostProcessingForDirectory(
 				return err
 			}
 		}
-		if err := generateCentralSlashCommandWorkflowWrapper(ctx, workflowDataList, absWorkflowDir, config.Strict); err != nil {
+		if err := generateCentralSlashCommandWorkflowWrapper(ctx, workflowDataList, absWorkflowDir, gitRoot, config.Strict); err != nil {
 			if config.Strict {
 				return err
 			}
@@ -604,6 +598,11 @@ func runPostProcessingForDirectory(
 
 	// Prune stale gh-aw-actions entries before saving
 	pruneStaleActionCacheEntries(compiler, actionCache)
+
+	// Prune orphaned entries — entries for action versions no longer referenced
+	// by any workflow in the directory (e.g. old pins left after a version bump).
+	// Safe to call only after a full-directory compilation with zero compile errors.
+	pruneOrphanedActionCacheEntries(compiler, actionCache, errorCount)
 
 	// Save action cache (errors are logged but non-fatal)
 	_ = saveActionCache(actionCache, config.Verbose)

@@ -11,9 +11,11 @@ import (
 	"strings"
 
 	"charm.land/huh/v2"
+
 	"github.com/github/gh-aw/pkg/console"
 	"github.com/github/gh-aw/pkg/constants"
 	"github.com/github/gh-aw/pkg/logger"
+	"github.com/github/gh-aw/pkg/setutil"
 	"github.com/github/gh-aw/pkg/styles"
 	"github.com/github/gh-aw/pkg/workflow"
 )
@@ -591,7 +593,8 @@ func detectNetworkFromRepo() []string {
 		return nil
 	}
 
-	seen := map[string]bool{}
+	seen := map[string]struct {
+	}{}
 	for _, m := range repoLanguageMarkers {
 		var found bool
 		if strings.ContainsAny(m.file, "*?[") {
@@ -602,8 +605,9 @@ func detectNetworkFromRepo() []string {
 			_, err := os.Stat(filepath.Join(cwd, m.file))
 			found = err == nil
 		}
-		if found && !seen[m.bucket] {
-			seen[m.bucket] = true
+		if found && !setutil.Contains(seen, m.bucket) {
+			seen[m.bucket] = struct {
+			}{}
 		}
 	}
 

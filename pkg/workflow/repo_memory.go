@@ -56,6 +56,7 @@ type RepoMemoryEntry struct {
 	CreateOrphan      bool     `yaml:"create-orphan,omitempty"`      // create orphaned branch if missing (default: true)
 	AllowedExtensions []string `yaml:"allowed-extensions,omitempty"` // allowed file extensions (default: [".json", ".jsonl", ".txt", ".md", ".csv"])
 	Wiki              bool     `yaml:"wiki,omitempty"`               // use the GitHub Wiki git repository instead of the regular repo
+	FormatJSON        bool     `yaml:"format-json,omitempty"`        // pretty-print all .json files before committing (default: false)
 }
 
 // RepoMemoryToolConfig represents the configuration for repo-memory in tools
@@ -308,6 +309,13 @@ func (c *Compiler) extractRepoMemoryConfig(toolsConfig *ToolsConfig, workflowID 
 					entry.AllowedExtensions = constants.DefaultAllowedMemoryExtensions
 				}
 
+				// Parse format-json field
+				if formatJSON, exists := memoryMap["format-json"]; exists {
+					if formatJSONBool, ok := formatJSON.(bool); ok {
+						entry.FormatJSON = formatJSONBool
+					}
+				}
+
 				config.Memories = append(config.Memories, entry)
 			}
 		}
@@ -465,6 +473,13 @@ func (c *Compiler) extractRepoMemoryConfig(toolsConfig *ToolsConfig, workflowID 
 			entry.AllowedExtensions = constants.DefaultAllowedMemoryExtensions
 		}
 
+		// Parse format-json field
+		if formatJSON, exists := configMap["format-json"]; exists {
+			if formatJSONBool, ok := formatJSON.(bool); ok {
+				entry.FormatJSON = formatJSONBool
+			}
+		}
+
 		config.Memories = []RepoMemoryEntry{entry}
 		return config, nil
 	}
@@ -489,7 +504,7 @@ func generateRepoMemoryArtifactUpload(builder *strings.Builder, data *WorkflowDa
 
 	for _, memory := range data.RepoMemoryConfig.Memories {
 		// Determine the memory directory
-		memoryDir := "/tmp/gh-aw/repo-memory/" + memory.ID
+		memoryDir := constants.TmpRepoMemoryDir + memory.ID
 
 		// Sanitize memory ID for artifact naming (remove hyphens, lowercase)
 		sanitizedID := SanitizeWorkflowIDForCacheKey(memory.ID)
@@ -548,7 +563,7 @@ func generateRepoMemorySteps(builder *strings.Builder, data *WorkflowData) {
 		}
 
 		// Determine the memory directory
-		memoryDir := "/tmp/gh-aw/repo-memory/" + memory.ID
+		memoryDir := constants.TmpRepoMemoryDir + memory.ID
 
 		// Step 1: Clone the repo-memory branch
 		if memory.Wiki {
@@ -679,7 +694,7 @@ func (c *Compiler) buildPushRepoMemoryJob(data *WorkflowData, threatDetectionEna
 			targetRepo = targetRepo + ".wiki"
 		}
 
-		artifactDir := "/tmp/gh-aw/repo-memory/" + memory.ID
+		artifactDir := constants.TmpRepoMemoryDir + memory.ID
 
 		// Build file glob filter string
 		fileGlobFilter := ""
@@ -719,6 +734,9 @@ func (c *Compiler) buildPushRepoMemoryJob(data *WorkflowData, threatDetectionEna
 		if fileGlobFilter != "" {
 			// Quote the value to prevent YAML alias interpretation of patterns like *.md
 			fmt.Fprintf(&step, "          FILE_GLOB_FILTER: \"%s\"\n", fileGlobFilter)
+		}
+		if memory.FormatJSON {
+			step.WriteString("          FORMAT_JSON: 'true'\n")
 		}
 		step.WriteString("        with:\n")
 		step.WriteString("          script: |\n")
@@ -796,7 +814,7 @@ func (c *Compiler) buildPushRepoMemoryJob(data *WorkflowData, threatDetectionEna
 	concurrency := c.indentYAMLLines(fmt.Sprintf("concurrency:\n  group: %q\n  cancel-in-progress: false", concurrencyGroup), "    ")
 
 	job := &Job{
-		Name:        "push_repo_memory",
+		Name:        pushRepoMemoryJobName,
 		DisplayName: "", // No display name - job ID is sufficient
 		RunsOn:      c.formatFrameworkJobRunsOn(data),
 		If:          jobCondition,

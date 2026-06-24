@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "🧪"
 description: Test Codex engine with GitHub remote MCP server
 on:
@@ -18,7 +19,8 @@ tools:
 timeout-minutes: 5
 strict: true
 
-
+features:
+  gh-aw-detection: true
 ---
 
 # Codex GitHub Remote MCP Test

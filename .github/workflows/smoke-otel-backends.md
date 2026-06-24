@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "🧪"
 description: Smoke test that validates OTEL span export and query access for Sentry, Grafana, and Datadog
 on:
@@ -44,6 +45,8 @@ imports:
   - shared/sentry.md
   - shared/grafana.md
   - shared/datadog.md
+features:
+  gh-aw-detection: true
 ---
 
 # Smoke OTEL

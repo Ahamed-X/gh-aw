@@ -71,6 +71,9 @@ func enhanceToolDescription(toolName, baseDescription string, safeOutputs *SafeO
 			if config.RequireTemporaryID {
 				constraints = append(constraints, "temporary_id is required.")
 			}
+			if config.NormalizeClosingKeywords != nil && *config.NormalizeClosingKeywords {
+				constraints = append(constraints, "Backtick-wrapped issue-closing keyword references (e.g. `Closes #1`) in the body field will be automatically normalized to plain text.")
+			}
 		}
 
 	case "set_issue_field":
@@ -217,6 +220,9 @@ func enhanceToolDescription(toolName, baseDescription string, safeOutputs *SafeO
 			if config.TargetRepoSlug != "" {
 				constraints = append(constraints, fmt.Sprintf("Comments will be added in repository %q.", config.TargetRepoSlug))
 			}
+			if config.NormalizeClosingKeywords != nil && *config.NormalizeClosingKeywords {
+				constraints = append(constraints, "Backtick-wrapped issue-closing keyword references (e.g. `Closes #1`) in the body field will be automatically normalized to plain text.")
+			}
 		}
 		constraints = append(constraints, "Supports reply_to_id for discussion threading.")
 
@@ -246,6 +252,9 @@ func enhanceToolDescription(toolName, baseDescription string, safeOutputs *SafeO
 			}
 			if config.RequireTemporaryID {
 				constraints = append(constraints, "temporary_id is required.")
+			}
+			if config.NormalizeClosingKeywords != nil && *config.NormalizeClosingKeywords {
+				constraints = append(constraints, "Backtick-wrapped issue-closing keyword references (e.g. `Closes #1`) in the body field will be automatically normalized to plain text.")
 			}
 		}
 
@@ -323,6 +332,29 @@ func enhanceToolDescription(toolName, baseDescription string, safeOutputs *SafeO
 			}
 			if len(config.Allowed) > 0 {
 				constraints = append(constraints, fmt.Sprintf("Only these labels can be removed: %v.", config.Allowed))
+			}
+			if config.Target != "" {
+				constraints = append(constraints, fmt.Sprintf("Target: %s.", config.Target))
+			}
+		}
+
+	case "replace_label":
+		if config := safeOutputs.ReplaceLabel; config != nil {
+			if templatableIntValue(config.Max) > 0 {
+				constraints = append(constraints, fmt.Sprintf("Maximum %d label replacement(s) allowed.", templatableIntValue(config.Max)))
+			}
+			if len(config.AllowedTransitions) > 0 {
+				pairs := make([]string, len(config.AllowedTransitions))
+				for i, t := range config.AllowedTransitions {
+					pairs[i] = fmt.Sprintf("%q → %q", t.From, t.To)
+				}
+				constraints = append(constraints, fmt.Sprintf("Only these label transitions are allowed: %s.", formatStringList(pairs)))
+			}
+			if len(config.AllowedAdd) > 0 {
+				constraints = append(constraints, fmt.Sprintf("Only these labels can be added: %s.", formatStringList(config.AllowedAdd)))
+			}
+			if len(config.AllowedRemove) > 0 {
+				constraints = append(constraints, fmt.Sprintf("Only these labels can be removed: %s.", formatStringList(config.AllowedRemove)))
 			}
 			if config.Target != "" {
 				constraints = append(constraints, fmt.Sprintf("Target: %s.", config.Target))

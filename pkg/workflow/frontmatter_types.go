@@ -260,6 +260,15 @@ type OTLPConfig struct {
 	//     user.id:             "{{ github.actor }}"
 	Attributes map[string]string `json:"attributes,omitempty"`
 
+	// ResourceAttributes defines additional OTEL_RESOURCE_ATTRIBUTES entries to
+	// append to the standard gh-aw/GitHub resource attributes.
+	//
+	// Values may be static strings or GitHub Actions expressions such as
+	// ${{ github.repository }}. Do not use secrets.* or vars.* expressions here:
+	// resource attributes are exported to external tracing backends and are not
+	// treated as secret values.
+	ResourceAttributes map[string]string `json:"resource-attributes,omitempty"`
+
 	// GitHubApp configures runtime OTLP authentication via the `github-app` key.
 	// Supported values:
 	//   github-app:
@@ -286,18 +295,19 @@ type FrontmatterConfig struct {
 	// configuration (e.g. {id: copilot, max-continuations: 2}).  Using any prevents
 	// JSON unmarshal failures when the engine is an object, which would otherwise cause
 	// ParseFrontmatterConfig to return nil and break features that depend on it (e.g. OTLP).
-	Engine            any               `json:"engine,omitempty"`
-	Source            string            `json:"source,omitempty"`
-	Redirect          string            `json:"redirect,omitempty"`
-	TrackerID         string            `json:"tracker-id,omitempty"`
-	Version           string            `json:"version,omitempty"`
-	TimeoutMinutes    *TemplatableInt32 `json:"timeout-minutes,omitempty"`
-	MaxAICredits      *TemplatableInt32 `json:"max-ai-credits,omitempty"`
-	MaxDailyAICredits *TemplatableInt32 `json:"max-daily-ai-credits,omitempty"`
-	MaxToolDenials    *TemplatableInt32 `json:"max-tool-denials,omitempty"`
-	Strict            *bool             `json:"strict,omitempty"`  // Pointer to distinguish unset from false
-	Private           *bool             `json:"private,omitempty"` // If true, workflow cannot be added to other repositories
-	Labels            []string          `json:"labels,omitempty"`
+	Engine             any               `json:"engine,omitempty"`
+	Source             string            `json:"source,omitempty"`
+	Redirect           string            `json:"redirect,omitempty"`
+	TrackerID          string            `json:"tracker-id,omitempty"`
+	Version            string            `json:"version,omitempty"`
+	TimeoutMinutes     *TemplatableInt32 `json:"timeout-minutes,omitempty"`
+	MaxAICredits       *TemplatableInt32 `json:"max-ai-credits,omitempty"`
+	MaxTurnCacheMisses *int32            `json:"max-turn-cache-misses,omitempty"`
+	MaxDailyAICredits  *TemplatableInt32 `json:"max-daily-ai-credits,omitempty"`
+	MaxToolDenials     *TemplatableInt32 `json:"max-tool-denials,omitempty"`
+	Strict             *bool             `json:"strict,omitempty"`  // Pointer to distinguish unset from false
+	Private            *bool             `json:"private,omitempty"` // If true, workflow cannot be added to other repositories
+	Labels             []string          `json:"labels,omitempty"`
 
 	// Configuration sections - using strongly-typed structs
 	Tools            *ToolsConfig       `json:"tools,omitempty"`

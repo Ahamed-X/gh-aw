@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "🧪"
 description: Smoke test that validates assign-to-agent with the agentic-workflows custom agent
 on:
@@ -47,6 +48,8 @@ safe-outputs:
     run-success: "✅ [{workflow_name}]({run_url}) completed. Issue assigned to the agentic-workflows agent."
     run-failure: "❌ [{workflow_name}]({run_url}) {status}. Check the logs for details."
 timeout-minutes: 10
+features:
+  gh-aw-detection: true
 ---
 
 # Smoke Agent: assign-to-agent with agentic-workflows

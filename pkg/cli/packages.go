@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/github/gh-aw/pkg/constants"
+	"github.com/github/gh-aw/pkg/setutil"
 
 	"github.com/github/gh-aw/pkg/console"
 	"github.com/github/gh-aw/pkg/logger"
@@ -26,7 +27,8 @@ var (
 func collectLocalIncludeDependencies(content, packagePath string, verbose bool) ([]IncludeDependency, error) {
 	packagesLog.Printf("Collecting include dependencies: packagePath=%s, content_size=%d", packagePath, len(content))
 	var dependencies []IncludeDependency
-	seen := make(map[string]bool)
+	seen := make(map[string]struct {
+	})
 
 	if verbose {
 		fmt.Fprintln(os.Stderr, console.FormatInfoMessage("Collecting package dependencies from: "+packagePath))
@@ -38,7 +40,8 @@ func collectLocalIncludeDependencies(content, packagePath string, verbose bool) 
 }
 
 // collectLocalIncludeDependenciesRecursive recursively processes @include directives in package content
-func collectLocalIncludeDependenciesRecursive(content, baseDir string, dependencies *[]IncludeDependency, seen map[string]bool, verbose bool) error {
+func collectLocalIncludeDependenciesRecursive(content, baseDir string, dependencies *[]IncludeDependency, seen map[string]struct {
+}, verbose bool) error {
 	scanner := bufio.NewScanner(strings.NewReader(content))
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -59,10 +62,11 @@ func collectLocalIncludeDependenciesRecursive(content, baseDir string, dependenc
 			fullSourcePath := filepath.Join(baseDir, filePath)
 
 			// Skip if we've already processed this file
-			if seen[fullSourcePath] {
+			if setutil.Contains(seen, fullSourcePath) {
 				continue
 			}
-			seen[fullSourcePath] = true
+			seen[fullSourcePath] = struct {
+			}{}
 
 			// Add dependency
 			dep := IncludeDependency{

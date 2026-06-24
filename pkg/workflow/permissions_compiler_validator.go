@@ -40,6 +40,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 )
 
 // validatePermissions validates all permission-related configuration: dangerous
@@ -161,12 +162,47 @@ Ensure proper audience validation and trust policies are configured.`
 		fmt.Fprintln(os.Stderr, formatCompilerMessage(markdownPath, "warning", warningMsg))
 		c.IncrementWarningCount()
 	}
-	if shouldEmitCopilotRequestsEnableTip(workflowData, workflowPermissions) {
-		tipMsg := `Tip: set permissions.copilot-requests: write to use GitHub Actions token-based inference with the Copilot engine instead of a personal access token (COPILOT_GITHUB_TOKEN).`
+	if shouldEmitCopilotRequestsEnableTip(workflowData, workflowPermissions) && !c.repositoryOwnerIsIndividualUser() {
+		tipMsg := `Tip: set permissions.copilot-requests: write to use GitHub Actions token-based inference with the Copilot engine instead of a personal access token (COPILOT_GITHUB_TOKEN). This option requires that your organization has centralized Copilot billing enabled and may not be available in all organizations — see https://github.github.com/gh-aw/reference/billing/ for details.`
 		fmt.Fprintln(os.Stderr, formatCompilerMessage(markdownPath, "info", tipMsg))
 	}
 
 	return workflowPermissions, nil
+}
+
+// repositoryOwnerIsIndividualUser reports whether the repository owner is confirmed
+// to be an individual user account (as opposed to an organization).
+//
+// It returns true only when the GitHub API confirms the owner type is "User". It
+// returns false when the owner is an organization, when no repository slug is set, or
+// when the API call fails (e.g. no authentication, network error). This fail-safe
+// default ensures the copilot-requests tip continues to be shown whenever the owner
+// type cannot be determined, preserving prior behavior.
+func (c *Compiler) repositoryOwnerIsIndividualUser() bool {
+	slug := c.repositorySlug
+	owner, repo, ok := strings.Cut(slug, "/")
+	if !ok || owner == "" || repo == "" {
+		workflowLog.Printf("Skipping owner-type check: slug %q is not in owner/repo format", slug)
+		return false
+	}
+
+	ownerType, cached := c.ownerTypeCache[owner]
+	if !cached {
+		workflowLog.Printf("Checking owner type for: %s", owner)
+		output, err := RunGH("Checking repository owner type...", "api", "/users/"+owner, "--jq", ".type")
+		if err != nil {
+			workflowLog.Printf("Could not determine owner type for %q: %v", owner, err)
+			// Cache the empty string so subsequent calls for the same owner also return false
+			// without retrying. This is intentional: fail-safe means "show the tip when uncertain"
+			// and avoids N retry round-trips per run.
+			c.ownerTypeCache[owner] = ""
+			return false
+		}
+		ownerType = strings.TrimSpace(string(output))
+		c.ownerTypeCache[owner] = ownerType
+		workflowLog.Printf("Owner type for %q: %s", owner, ownerType)
+	}
+	return ownerType == "User"
 }
 
 func shouldEmitCopilotRequestsEnableTip(workflowData *WorkflowData, workflowPermissions *Permissions) bool {

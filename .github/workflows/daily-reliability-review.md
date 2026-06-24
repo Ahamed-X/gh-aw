@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "🚨"
 name: Daily Reliability Review
 description: Daily reliability review of agentic workflow failures and regressions using Sentry traces
@@ -36,6 +37,8 @@ imports:
       labels: [observability, automated-analysis]
   - shared/sentry.md
   - shared/mcp/sentry.md
+features:
+  gh-aw-detection: true
 ---
 
 # Daily Reliability Review

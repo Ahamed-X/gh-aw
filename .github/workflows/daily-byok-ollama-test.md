@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "🦙"
 description: Daily test of the Copilot BYOK endpoint using a local Ollama instance with a small model
 on:
@@ -26,6 +27,8 @@ steps:
       OLLAMA_API_KEY="$(openssl rand -hex 16)"
       echo "OLLAMA_API_KEY=$OLLAMA_API_KEY" >> "$GITHUB_ENV"
   - name: Start Ollama service
+    env:
+      OLLAMA_HOST: "0.0.0.0:11434"
     run: |
       ollama serve &
       echo "Waiting for Ollama service..."
@@ -54,6 +57,8 @@ safe-outputs:
     run-started: "🦙 BYOK Ollama test starting... [{workflow_name}]({run_url})"
     run-success: "✅ [{workflow_name}]({run_url}) — BYOK endpoint responded."
     run-failure: "❌ [{workflow_name}]({run_url}) — BYOK endpoint test failed: {status}"
+features:
+  gh-aw-detection: true
 ---
 
 # Daily BYOK Endpoint Test

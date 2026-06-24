@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/github/gh-aw/pkg/constants"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -42,7 +43,7 @@ type logsArgs struct {
 	BeforeRunID       int64    `json:"before_run_id,omitempty" jsonschema:"Filter runs with database ID before this value (exclusive)"`
 	Timeout           int      `json:"timeout,omitempty" jsonschema:"Maximum time in minutes to spend downloading logs (default: 1 for MCP server)"`
 	MaxTokens         int      `json:"max_tokens,omitempty" jsonschema:"Deprecated: accepted for backward compatibility but ignored. Output is always written to a file."`
-	Artifacts         []string `json:"artifacts,omitempty" jsonschema:"Artifact sets to download (default: all). Valid sets: all, activation, agent, detection, experiment, firewall, github-api, mcp, usage"`
+	Artifacts         []string `json:"artifacts,omitempty" jsonschema:"Artifact sets to download (default: usage). Valid sets: all, activation, agent, detection, experiment, firewall, github-api, mcp, usage"`
 }
 
 // The logs tool requires write+ access and checks actor permissions.
@@ -63,6 +64,9 @@ func registerLogsTool(server *mcp.Server, execCmd execCmdFunc, actor string, val
 	}
 	if err := AddSchemaDefault(logsSchema, "max_tokens", 12000); err != nil {
 		mcpLog.Printf("Failed to add default for max_tokens: %v", err)
+	}
+	if err := AddSchemaDefault(logsSchema, "artifacts", []string{"usage"}); err != nil {
+		mcpLog.Printf("Failed to add default for artifacts: %v", err)
 	}
 
 	mcp.AddTool(server, &mcp.Tool{
@@ -133,7 +137,7 @@ from where the previous request stopped due to timeout.`,
 
 		// Build command arguments
 		// Force output directory to /tmp/gh-aw/aw-mcp/logs for MCP server
-		cmdArgs := []string{"logs", "-o", "/tmp/gh-aw/aw-mcp/logs"}
+		cmdArgs := []string{"logs", "-o", constants.TmpAwMcpLogsDir}
 		if args.WorkflowName != "" {
 			cmdArgs = append(cmdArgs, args.WorkflowName)
 		}
@@ -159,7 +163,9 @@ from where the previous request stopped due to timeout.`,
 			cmdArgs = append(cmdArgs, "--filtered-integrity")
 		}
 		if args.Branch != "" {
-			cmdArgs = append(cmdArgs, "--branch", args.Branch)
+			// The MCP parameter is named "branch" for backwards compatibility,
+			// but the logs CLI flag is --ref (which accepts branches and tags).
+			cmdArgs = append(cmdArgs, "--ref", args.Branch)
 		}
 		if args.AfterRunID > 0 {
 			cmdArgs = append(cmdArgs, "--after-run-id", strconv.FormatInt(args.AfterRunID, 10))
@@ -384,7 +390,7 @@ Multi-run diff returns JSON describing changes between the base and each compari
 		// Pass all run IDs/URLs directly - the audit command handles single vs. diff mode.
 		cmdArgs := []string{"audit"}
 		cmdArgs = append(cmdArgs, runItems...)
-		cmdArgs = append(cmdArgs, "-o", "/tmp/gh-aw/aw-mcp/logs", "--json")
+		cmdArgs = append(cmdArgs, "-o", constants.TmpAwMcpLogsDir, "--json")
 		if len(args.Artifacts) > 0 {
 			cmdArgs = append(cmdArgs, "--artifacts", strings.Join(args.Artifacts, ","))
 		}
@@ -525,7 +531,7 @@ Returns JSON describing the differences between the base run and each comparison
 		// Build: gh aw audit diff <base> <compare...> -o ... --json [--artifacts ...]
 		cmdArgs := []string{"audit", "diff", args.BaseRunID}
 		cmdArgs = append(cmdArgs, args.CompareRunIDs...)
-		cmdArgs = append(cmdArgs, "-o", "/tmp/gh-aw/aw-mcp/logs", "--json")
+		cmdArgs = append(cmdArgs, "-o", constants.TmpAwMcpLogsDir, "--json")
 		if len(args.Artifacts) > 0 {
 			cmdArgs = append(cmdArgs, "--artifacts", strings.Join(args.Artifacts, ","))
 		}

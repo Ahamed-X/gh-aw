@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "✅"
 name: Approach Validator
 description: Validates proposed technical approaches before implementation begins using a sequential multi-agent panel of Devil's Advocate, Alternatives Scout, Implementation Estimator, and Dead End Detector
@@ -46,7 +47,8 @@ safe-outputs:
     run-success: "✅ [{workflow_name}]({run_url}) completed the approach validation. Review the report and react with ✅ or ❌."
     run-failure: "❌ [{workflow_name}]({run_url}) {status} during approach validation."
 timeout-minutes: 30
-
+features:
+  gh-aw-detection: true
 ---
 
 # Approach Validator 🔬

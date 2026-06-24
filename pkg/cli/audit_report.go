@@ -14,6 +14,7 @@ import (
 	"github.com/github/gh-aw/pkg/github"
 	"github.com/github/gh-aw/pkg/logger"
 	"github.com/github/gh-aw/pkg/sliceutil"
+	"github.com/github/gh-aw/pkg/stringutil"
 	"github.com/github/gh-aw/pkg/timeutil"
 )
 
@@ -197,7 +198,9 @@ type MCPToolCall struct {
 
 // MCPServerStats contains server-level statistics
 type MCPServerStats struct {
-	ServerName      string `json:"server_name" console:"header:Server"`
+	ServerName string `json:"server_name" console:"header:Server"`
+	// RequestCount is kept for backward-compatible report schemas that label per-server
+	// request volume; in MCP usage summaries this currently mirrors ToolCallCount.
 	RequestCount    int    `json:"request_count" console:"header:Requests"`
 	ToolCallCount   int    `json:"tool_call_count" console:"header:Tool Calls"`
 	TotalInputSize  int    `json:"total_input_size" console:"header:Total Input,format:number"`
@@ -687,9 +690,7 @@ func extractPreAgentStepErrors(logsPath string) []ErrorInfo {
 
 			if len(errorLines) > 0 {
 				message := strings.Join(errorLines, "\n")
-				if len(message) > maxMessageLen {
-					message = message[:maxMessageLen] + "..."
-				}
+				message = stringutil.Truncate(message, maxMessageLen)
 				auditReportLog.Printf("Extracted ##[error] annotations from flat job log %s (job %d)", jobName, num)
 				errorAnnotations = append(errorAnnotations, ErrorInfo{
 					Type:    "step_failure",
@@ -743,9 +744,7 @@ func extractPreAgentStepErrors(logsPath string) []ErrorInfo {
 
 			if len(errorLines) > 0 {
 				message := strings.Join(errorLines, "\n")
-				if len(message) > maxMessageLen {
-					message = message[:maxMessageLen] + "..."
-				}
+				message = stringutil.Truncate(message, maxMessageLen)
 				auditReportLog.Printf("Extracted ##[error] annotations from %s (step %d)", stepKey, num)
 				errorAnnotations = append(errorAnnotations, ErrorInfo{
 					Type:    "step_failure",
@@ -778,9 +777,7 @@ func extractPreAgentStepErrors(logsPath string) []ErrorInfo {
 		return nil
 	}
 
-	if len(message) > maxMessageLen {
-		message = message[:maxMessageLen] + "..."
-	}
+	message = stringutil.Truncate(message, maxMessageLen)
 
 	auditReportLog.Printf("Extracted pre-agent step error from %s (step %d) as fallback", lastStep.stepKey, lastStep.num)
 	return []ErrorInfo{{

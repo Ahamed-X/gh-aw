@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "📋"
 name: Changeset Generator
 description: Automatically creates changeset files when PRs are labeled with 'changeset' or 'smoke' to document changes for release notes
@@ -31,9 +32,10 @@ safe-outputs:
   update-pull-request:
     title: false
     operation: append
-  threat-detection:
-    engine: false
+  threat-detection: {}
 timeout-minutes: 20
+features:
+  gh-aw-detection: true
 network:
   allowed:
     - defaults

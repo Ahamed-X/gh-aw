@@ -1,10 +1,26 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import { createRequire } from "module";
+import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
 
 const require = createRequire(import.meta.url);
 const { runWithCopilotSDK, parsePermissionConfigFromServerArgs } = require("./copilot_sdk_driver.cjs");
 
 describe("copilot_sdk_driver.cjs", () => {
+  let testSessionStateDir;
+  let prevSessionStateDir;
+  beforeAll(() => {
+    prevSessionStateDir = process.env.GH_AW_SESSION_STATE_BASE_DIR;
+    testSessionStateDir = fs.mkdtempSync(path.join(os.tmpdir(), "gh-aw-test-session-state-"));
+    process.env.GH_AW_SESSION_STATE_BASE_DIR = testSessionStateDir;
+  });
+  afterAll(() => {
+    if (prevSessionStateDir === undefined) delete process.env.GH_AW_SESSION_STATE_BASE_DIR;
+    else process.env.GH_AW_SESSION_STATE_BASE_DIR = prevSessionStateDir;
+    if (testSessionStateDir) fs.rmSync(testSessionStateDir, { recursive: true, force: true });
+  });
+
   describe("runWithCopilotSDK", () => {
     it("disconnects session and stops client on success", async () => {
       const disconnect = vi.fn().mockResolvedValue(undefined);
@@ -101,6 +117,219 @@ describe("copilot_sdk_driver.cjs", () => {
       expect(result.output).toContain("send failed");
       expect(disconnect).toHaveBeenCalledTimes(1);
       expect(stop).toHaveBeenCalledTimes(1);
+    });
+
+    it("serializes tool.execution_start command details when available", async () => {
+      const disconnect = vi.fn().mockResolvedValue(undefined);
+      const stop = vi.fn().mockResolvedValue(undefined);
+      const stderrWriteSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      try {
+        let onEvent = () => {};
+        const session = {
+          sessionId: "session-tool-start-command",
+          on: handler => {
+            onEvent = handler;
+          },
+          sendAndWait: vi.fn().mockImplementation(async () => {
+            onEvent({
+              type: "tool.execution_start",
+              ephemeral: false,
+              timestamp: new Date().toISOString(),
+              data: {
+                toolName: "bash",
+                mcpServerName: "terminal",
+                input: { command: "git status" },
+              },
+            });
+            onEvent({
+              type: "assistant.message",
+              ephemeral: false,
+              timestamp: new Date().toISOString(),
+              data: { content: "ok" },
+            });
+            return { data: { content: "ok" } };
+          }),
+          disconnect,
+        };
+        class FakeCopilotClient {
+          start = vi.fn().mockResolvedValue(undefined);
+          createSession = vi.fn().mockResolvedValue(session);
+          stop = stop;
+        }
+
+        const result = await runWithCopilotSDK({
+          sdkUri: "http://127.0.0.1:3002",
+          prompt: "test prompt",
+          logger: () => {},
+          sdkModule: {
+            CopilotClient: FakeCopilotClient,
+            RuntimeConnection: { forUri: vi.fn(() => ({})) },
+            approveAll: () => "allow",
+          },
+        });
+
+        expect(result.exitCode).toBe(0);
+        const parsedEvents = stderrWriteSpy.mock.calls
+          .map(([message]) => {
+            if (typeof message !== "string" || !message.endsWith("\n")) return null;
+            try {
+              return JSON.parse(message.trimEnd());
+            } catch {
+              return null;
+            }
+          })
+          .filter(Boolean);
+        const startEvent = parsedEvents.find(event => event.type === "tool.execution_start");
+        expect(startEvent).toMatchObject({
+          type: "tool.execution_start",
+          data: { toolName: "bash", mcpServerName: "terminal", command: "git status" },
+        });
+      } finally {
+        stderrWriteSpy.mockRestore();
+      }
+    });
+
+    it("resolves exitCode 0 on SDK idle-timeout when output collected and all tool calls complete", async () => {
+      // Regression test: when sendAndWait throws an idle-timeout error but the agent
+      // produced output and all tool calls completed, the driver must return exitCode 0.
+      // This covers the case where the SDK drops the session.idle signal on long runs.
+      const disconnect = vi.fn().mockResolvedValue(undefined);
+      const stop = vi.fn().mockResolvedValue(undefined);
+      let onEvent = () => {};
+      const session = {
+        sessionId: "session-idle-timeout-success",
+        on: handler => {
+          onEvent = handler;
+        },
+        sendAndWait: vi.fn().mockImplementation(async () => {
+          // Simulate tool execution events before the idle-timeout
+          onEvent({
+            type: "tool.execution_start",
+            ephemeral: false,
+            timestamp: new Date().toISOString(),
+            data: { toolName: "bash", mcpServerName: "terminal", toolCallId: "call-1" },
+          });
+          onEvent({
+            type: "assistant.message",
+            ephemeral: false,
+            timestamp: new Date().toISOString(),
+            data: { content: "I found the answer" },
+          });
+          onEvent({
+            type: "tool.execution_complete",
+            ephemeral: false,
+            timestamp: new Date().toISOString(),
+            data: { toolCallId: "call-1", success: true },
+          });
+          throw new Error("Timeout after 870000ms waiting for session.idle");
+        }),
+        disconnect,
+      };
+      class FakeCopilotClient {
+        start = vi.fn().mockResolvedValue(undefined);
+        createSession = vi.fn().mockResolvedValue(session);
+        stop = stop;
+      }
+
+      const result = await runWithCopilotSDK({
+        sdkUri: "http://127.0.0.1:3002",
+        prompt: "test prompt",
+        logger: () => {},
+        sdkModule: {
+          CopilotClient: FakeCopilotClient,
+          RuntimeConnection: { forUri: vi.fn(() => ({})) },
+          approveAll: () => "allow",
+        },
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.hasOutput).toBe(true);
+      expect(result.output).toContain("I found the answer");
+      expect(disconnect).toHaveBeenCalledTimes(1);
+      expect(stop).toHaveBeenCalledTimes(1);
+    });
+
+    it("returns exitCode 1 on SDK idle-timeout when tool calls are still pending", async () => {
+      // When the idle-timeout fires with in-flight (unmatched) tool calls, the agent did
+      // not finish cleanly — the driver must NOT treat it as success.
+      const disconnect = vi.fn().mockResolvedValue(undefined);
+      const stop = vi.fn().mockResolvedValue(undefined);
+      let onEvent = () => {};
+      const session = {
+        sessionId: "session-idle-timeout-pending-tools",
+        on: handler => {
+          onEvent = handler;
+        },
+        sendAndWait: vi.fn().mockImplementation(async () => {
+          onEvent({
+            type: "tool.execution_start",
+            ephemeral: false,
+            timestamp: new Date().toISOString(),
+            data: { toolName: "bash", mcpServerName: "terminal", toolCallId: "call-pending" },
+          });
+          onEvent({
+            type: "assistant.message",
+            ephemeral: false,
+            timestamp: new Date().toISOString(),
+            data: { content: "working on it" },
+          });
+          // tool.execution_complete is never emitted — tool call remains pending
+          throw new Error("Timeout after 870000ms waiting for session.idle");
+        }),
+        disconnect,
+      };
+      class FakeCopilotClient {
+        start = vi.fn().mockResolvedValue(undefined);
+        createSession = vi.fn().mockResolvedValue(session);
+        stop = stop;
+      }
+
+      const result = await runWithCopilotSDK({
+        sdkUri: "http://127.0.0.1:3002",
+        prompt: "test prompt",
+        logger: () => {},
+        sdkModule: {
+          CopilotClient: FakeCopilotClient,
+          RuntimeConnection: { forUri: vi.fn(() => ({})) },
+          approveAll: () => "allow",
+        },
+      });
+
+      expect(result.exitCode).toBe(1);
+      expect(result.hasOutput).toBe(true);
+      expect(result.output).toContain("working on it");
+    });
+
+    it("returns exitCode 1 on SDK idle-timeout with no output collected", async () => {
+      // When the idle-timeout fires before the agent produces any output, the driver
+      // must return exitCode 1 — there is nothing useful to surface.
+      const disconnect = vi.fn().mockResolvedValue(undefined);
+      const stop = vi.fn().mockResolvedValue(undefined);
+      const session = {
+        sessionId: "session-idle-timeout-no-output",
+        on: () => {},
+        sendAndWait: vi.fn().mockRejectedValue(new Error("Timeout after 870000ms waiting for session.idle")),
+        disconnect,
+      };
+      class FakeCopilotClient {
+        start = vi.fn().mockResolvedValue(undefined);
+        createSession = vi.fn().mockResolvedValue(session);
+        stop = stop;
+      }
+
+      const result = await runWithCopilotSDK({
+        sdkUri: "http://127.0.0.1:3002",
+        prompt: "test prompt",
+        logger: () => {},
+        sdkModule: {
+          CopilotClient: FakeCopilotClient,
+          RuntimeConnection: { forUri: vi.fn(() => ({})) },
+          approveAll: () => "allow",
+        },
+      });
+
+      expect(result.exitCode).toBe(1);
+      expect(result.hasOutput).toBe(false);
     });
 
     it("passes custom provider and model through to SDK createSession", async () => {
@@ -380,6 +609,75 @@ describe("copilot_sdk_driver.cjs", () => {
         kind: "reject",
         feedback: "Tool invocation is not allowed by workflow tool permissions.",
       });
+    });
+
+    it("allows read requests when absolute path matches a workspace-relative shell pattern", async () => {
+      // Simulates the daily-compiler-quality failure where the agent calls view() with
+      // an absolute path like /home/runner/work/gh-aw/gh-aw/pkg/workflow/file.go but
+      // the workflow only grants shell(cat pkg/**/*.go) (a relative glob pattern).
+      const prevWorkspace = process.env.GITHUB_WORKSPACE;
+      process.env.GITHUB_WORKSPACE = "/home/runner/work/gh-aw/gh-aw";
+      try {
+        const disconnect = vi.fn().mockResolvedValue(undefined);
+        const stop = vi.fn().mockResolvedValue(undefined);
+        const createSession = vi.fn().mockResolvedValue({
+          sessionId: "session-workspace-relative-read",
+          on: () => {},
+          sendAndWait: vi.fn().mockResolvedValue({ data: { content: "ok" } }),
+          disconnect,
+        });
+        class FakeCopilotClient {
+          start = vi.fn().mockResolvedValue(undefined);
+          createSession = createSession;
+          stop = stop;
+        }
+
+        await runWithCopilotSDK({
+          sdkUri: "http://127.0.0.1:3002",
+          prompt: "test prompt",
+          logger: () => {},
+          permissionConfig: {
+            allowedTools: ["shell(cat pkg/**/*.go)", "shell(grep)", "shell(wc)"],
+          },
+          sdkModule: {
+            CopilotClient: FakeCopilotClient,
+            RuntimeConnection: { forUri: vi.fn(() => ({})) },
+            approveAll: () => ({ kind: "approve-once" }),
+          },
+        });
+
+        const sessionConfig = createSession.mock.calls[0][0];
+        const onPermissionRequest = sessionConfig.onPermissionRequest;
+
+        // Absolute paths within the workspace must be allowed via the relative pattern.
+        expect(onPermissionRequest({ kind: "read", path: "/home/runner/work/gh-aw/gh-aw/pkg/workflow/compiler_activation_job_builder.go", intention: "" })).toEqual({ kind: "approve-once" });
+        expect(onPermissionRequest({ kind: "read", path: "/home/runner/work/gh-aw/gh-aw/pkg/workflow/compiler_pre_activation_job.go", intention: "" })).toEqual({ kind: "approve-once" });
+        expect(onPermissionRequest({ kind: "read", path: "/home/runner/work/gh-aw/gh-aw/pkg/workflow/compiler_types.go", intention: "" })).toEqual({ kind: "approve-once" });
+
+        // Relative paths that match the pattern must still work.
+        expect(onPermissionRequest({ kind: "read", path: "pkg/workflow/compiler.go", intention: "" })).toEqual({ kind: "approve-once" });
+
+        // Files outside pkg/ or outside the workspace root must be denied.
+        expect(onPermissionRequest({ kind: "read", path: "/home/runner/work/gh-aw/gh-aw/AGENTS.md", intention: "" })).toEqual({
+          kind: "reject",
+          feedback: "Tool invocation is not allowed by workflow tool permissions.",
+        });
+        expect(onPermissionRequest({ kind: "read", path: "/etc/passwd", intention: "" })).toEqual({
+          kind: "reject",
+          feedback: "Tool invocation is not allowed by workflow tool permissions.",
+        });
+        // A path outside the workspace that contains /pkg/ must not be permitted.
+        expect(onPermissionRequest({ kind: "read", path: "/other/workspace/pkg/workflow/file.go", intention: "" })).toEqual({
+          kind: "reject",
+          feedback: "Tool invocation is not allowed by workflow tool permissions.",
+        });
+      } finally {
+        if (prevWorkspace === undefined) {
+          delete process.env.GITHUB_WORKSPACE;
+        } else {
+          process.env.GITHUB_WORKSPACE = prevWorkspace;
+        }
+      }
     });
 
     it("logs permission-denied SDK requests as core warnings", async () => {

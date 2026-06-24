@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/github/gh-aw/pkg/setutil"
 	"github.com/github/gh-aw/pkg/testutil"
 
 	"github.com/goccy/go-yaml"
@@ -264,7 +265,7 @@ func TestGenerateDependabotConfig(t *testing.T) {
 	tempDir := testutil.TempDir(t, "test-*")
 	dependabotPath := filepath.Join(tempDir, "dependabot.yml")
 
-	ecosystems := map[string]bool{"npm": true}
+	ecosystems := map[string]struct{}{"npm": {}}
 
 	// Test creating new dependabot.yml
 	err := compiler.generateDependabotConfig(dependabotPath, ecosystems, false)
@@ -327,7 +328,7 @@ func TestGenerateDependabotConfig_PreserveExisting(t *testing.T) {
 	existingData, _ := yaml.Marshal(&existingConfig)
 	os.WriteFile(dependabotPath, existingData, 0644)
 
-	ecosystems := map[string]bool{"npm": true}
+	ecosystems := map[string]struct{}{"npm": {}}
 
 	// Try to generate without force - should preserve
 	err := compiler.generateDependabotConfig(dependabotPath, ecosystems, false)
@@ -977,10 +978,10 @@ func TestGenerateDependabotConfig_MultipleEcosystems(t *testing.T) {
 	tempDir := testutil.TempDir(t, "test-*")
 	dependabotPath := filepath.Join(tempDir, "dependabot.yml")
 
-	ecosystems := map[string]bool{
-		"npm":   true,
-		"pip":   true,
-		"gomod": true,
+	ecosystems := map[string]struct{}{
+		"npm":   {},
+		"pip":   {},
+		"gomod": {},
 	}
 
 	// Test creating new dependabot.yml with multiple ecosystems
@@ -1014,9 +1015,9 @@ func TestGenerateDependabotConfig_MultipleEcosystems(t *testing.T) {
 	}
 
 	// Check that all ecosystems are present
-	ecosystemsFound := make(map[string]bool)
+	ecosystemsFound := make(map[string]struct{})
 	for _, update := range config.Updates {
-		ecosystemsFound[update.PackageEcosystem] = true
+		ecosystemsFound[update.PackageEcosystem] = struct{}{}
 		if update.Directory != "/.github/workflows" {
 			t.Errorf("expected directory '/.github/workflows', got %q", update.Directory)
 		}
@@ -1026,7 +1027,7 @@ func TestGenerateDependabotConfig_MultipleEcosystems(t *testing.T) {
 	}
 
 	for ecosystem := range ecosystems {
-		if !ecosystemsFound[ecosystem] {
+		if !setutil.Contains(ecosystemsFound, ecosystem) {
 			t.Errorf("ecosystem %q not found in dependabot.yml", ecosystem)
 		}
 	}

@@ -8,10 +8,12 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/github/gh-aw/pkg/constants"
 	"github.com/github/gh-aw/pkg/logger"
+	"github.com/github/gh-aw/pkg/sliceutil"
 )
 
 var centralSlashCommandWorkflowLog = logger.New("workflow:central_slash_command_workflow")
@@ -22,9 +24,10 @@ const (
 )
 
 type slashCommandRoute struct {
-	Workflow   string   `json:"workflow"`
-	Events     []string `json:"events"`
-	AIReaction string   `json:"ai_reaction,omitempty"`
+	Workflow      string   `json:"workflow"`
+	Events        []string `json:"events"`
+	AIReaction    string   `json:"ai_reaction,omitempty"`
+	StatusComment bool     `json:"status_comment,omitempty"`
 }
 
 type commandsHeaderMetadata struct {
@@ -35,10 +38,19 @@ type commandsHeaderMetadata struct {
 	Workflows      []string `json:"workflows"`
 }
 
+type helpCommandEntry struct {
+	Command       string `json:"command"`
+	Description   string `json:"description,omitempty"`
+	Centralized   bool   `json:"centralized"`
+	Decentralized bool   `json:"decentralized"`
+	Label         bool   `json:"label,omitempty"`
+	SourceFile    string `json:"source_file,omitempty"`
+}
+
 // GenerateCentralSlashCommandWorkflow generates a single centralized slash-command trigger
 // workflow for workflows that opt into on.slash_command.strategy: centralized.
 // When no centralized slash-command workflows are found, any existing generated file is deleted.
-func GenerateCentralSlashCommandWorkflow(ctx context.Context, workflowDataList []*WorkflowData, workflowDir string) error {
+func GenerateCentralSlashCommandWorkflow(ctx context.Context, workflowDataList []*WorkflowData, workflowDir string, repoConfig *RepoConfig) error {
 	centralSlashCommandWorkflowLog.Printf("Generating centralized slash-command workflow from %d workflow(s)", len(workflowDataList))
 	slashRoutesByCommand, labelRoutesByCommand, mergedEvents := collectCentralCommandRoutes(workflowDataList)
 
@@ -58,7 +70,18 @@ func GenerateCentralSlashCommandWorkflow(ctx context.Context, workflowDataList [
 	actionMode := DetectActionMode(GetVersion())
 	setupActionRef := ResolveSetupActionReference(ctx, actionMode, GetVersion(), "", nil)
 
-	content, err := buildCentralSlashCommandWorkflowYAML(slashRoutesByCommand, labelRoutesByCommand, mergedEvents, resolveCentralSlashRunsOn(workflowDataList), setupActionRef)
+	helpCommands := buildHelpCommandEntries(workflowDataList)
+	helpCommandEnabled := repoConfig.IsHelpCommandEnabled()
+
+	content, err := buildCentralSlashCommandWorkflowYAML(
+		slashRoutesByCommand,
+		labelRoutesByCommand,
+		mergedEvents,
+		resolveCentralSlashRunsOn(workflowDataList),
+		setupActionRef,
+		helpCommands,
+		helpCommandEnabled,
+	)
 	if err != nil {
 		return err
 	}
@@ -121,7 +144,8 @@ func collectCentralSlashCommandRoutes(workflowDataList []*WorkflowData) (map[str
 		}
 
 		routeEvents := GetCommentEventNames(filteredEvents)
-		routeEvents = uniqueSorted(routeEvents)
+		routeEvents = sliceutil.Deduplicate(routeEvents)
+		sort.Strings(routeEvents)
 		if len(routeEvents) == 0 {
 			continue
 		}
@@ -137,7 +161,7 @@ func collectCentralSlashCommandRoutes(workflowDataList []*WorkflowData) (map[str
 		}
 
 		for _, commandName := range commandNames {
-			routesByCommand[commandName] = append(routesByCommand[commandName], buildCentralizedRoutes(wd, routeEvents)...)
+			routesByCommand[commandName] = append(routesByCommand[commandName], buildCentralizedRoutes(wd, routeEvents, true)...)
 		}
 	}
 
@@ -163,6 +187,10 @@ func collectCentralSlashCommandRoutes(workflowDataList []*WorkflowData) (map[str
 				return -1
 			case left.AIReaction > right.AIReaction:
 				return 1
+			case !left.StatusComment && right.StatusComment:
+				return -1
+			case left.StatusComment && !right.StatusComment:
+				return 1
 			default:
 				return 0
 			}
@@ -187,7 +215,8 @@ func collectCentralLabelCommandRoutes(workflowDataList []*WorkflowData, mergedEv
 		}
 
 		filteredEvents := FilterLabelCommandEvents(wd.LabelCommandEvents)
-		routeEvents := uniqueSorted(filteredEvents)
+		routeEvents := sliceutil.Deduplicate(filteredEvents)
+		sort.Strings(routeEvents)
 		if len(routeEvents) == 0 {
 			continue
 		}
@@ -200,7 +229,7 @@ func collectCentralLabelCommandRoutes(workflowDataList []*WorkflowData, mergedEv
 		}
 
 		for _, labelName := range wd.LabelCommand {
-			routesByLabel[labelName] = append(routesByLabel[labelName], buildCentralizedRoutes(wd, routeEvents)...)
+			routesByLabel[labelName] = append(routesByLabel[labelName], buildCentralizedRoutes(wd, routeEvents, false)...)
 		}
 	}
 
@@ -225,6 +254,10 @@ func collectCentralLabelCommandRoutes(workflowDataList []*WorkflowData, mergedEv
 				return -1
 			case left.AIReaction > right.AIReaction:
 				return 1
+			case !left.StatusComment && right.StatusComment:
+				return -1
+			case left.StatusComment && !right.StatusComment:
+				return 1
 			default:
 				return 0
 			}
@@ -234,7 +267,7 @@ func collectCentralLabelCommandRoutes(workflowDataList []*WorkflowData, mergedEv
 	return routesByLabel
 }
 
-func buildCentralizedRoutes(wd *WorkflowData, routeEvents []string) []slashCommandRoute {
+func buildCentralizedRoutes(wd *WorkflowData, routeEvents []string, includeStatusComment bool) []slashCommandRoute {
 	if wd == nil {
 		return nil
 	}
@@ -242,17 +275,25 @@ func buildCentralizedRoutes(wd *WorkflowData, routeEvents []string) []slashComma
 	groupOrder := make([]string, 0, len(routeEvents))
 	for _, eventName := range routeEvents {
 		reaction := resolveCentralizedEventReaction(wd, eventName)
-		if _, exists := eventGroups[reaction]; !exists {
-			groupOrder = append(groupOrder, reaction)
+		statusComment := includeStatusComment && resolveCentralizedEventStatusComment(wd, eventName)
+		// Reactions are limited to GitHub's fixed enum values, so "|" is a safe
+		// separator for grouping the per-event route metadata deterministically.
+		groupKey := reaction + "|" + strconv.FormatBool(statusComment)
+		if _, exists := eventGroups[groupKey]; !exists {
+			groupOrder = append(groupOrder, groupKey)
 		}
-		eventGroups[reaction] = append(eventGroups[reaction], eventName)
+		eventGroups[groupKey] = append(eventGroups[groupKey], eventName)
 	}
 	routes := make([]slashCommandRoute, 0, len(groupOrder))
-	for _, reaction := range groupOrder {
+	for _, groupKey := range groupOrder {
+		parts := strings.SplitN(groupKey, "|", 2)
+		reaction := parts[0]
+		statusComment := len(parts) == 2 && parts[1] == "true"
 		routes = append(routes, slashCommandRoute{
-			Workflow:   wd.WorkflowID,
-			Events:     slices.Clone(eventGroups[reaction]),
-			AIReaction: reaction,
+			Workflow:      wd.WorkflowID,
+			Events:        slices.Clone(eventGroups[groupKey]),
+			AIReaction:    reaction,
+			StatusComment: statusComment,
 		})
 	}
 	return routes
@@ -281,7 +322,32 @@ func resolveCentralizedEventReaction(wd *WorkflowData, eventName string) string 
 	return ""
 }
 
-func buildCentralSlashCommandWorkflowYAML(slashRoutesByCommand map[string][]slashCommandRoute, labelRoutesByCommand map[string][]slashCommandRoute, mergedEvents map[string]map[string]bool, runsOn string, setupActionRef string) (string, error) {
+func resolveCentralizedEventStatusComment(wd *WorkflowData, eventName string) bool {
+	if wd == nil || wd.StatusComment == nil || !*wd.StatusComment {
+		return false
+	}
+
+	switch eventName {
+	case "issues", "issue_comment":
+		return shouldIncludeIssueStatusComments(wd)
+	case "pull_request", "pull_request_comment", "pull_request_review_comment":
+		return shouldIncludePullRequestStatusComments(wd)
+	case "discussion", "discussion_comment":
+		return shouldIncludeDiscussionStatusComments(wd)
+	default:
+		return false
+	}
+}
+
+func buildCentralSlashCommandWorkflowYAML(
+	slashRoutesByCommand map[string][]slashCommandRoute,
+	labelRoutesByCommand map[string][]slashCommandRoute,
+	mergedEvents map[string]map[string]bool,
+	runsOn string,
+	setupActionRef string,
+	helpCommands []helpCommandEntry,
+	helpCommandEnabled bool,
+) (string, error) {
 	slashRoutesJSON, err := json.Marshal(slashRoutesByCommand)
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal centralized slash-command routes: %w", err)
@@ -289,6 +355,10 @@ func buildCentralSlashCommandWorkflowYAML(slashRoutesByCommand map[string][]slas
 	labelRoutesJSON, err := json.Marshal(labelRoutesByCommand)
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal decentralized label-command routes: %w", err)
+	}
+	helpCommandsJSON, err := json.Marshal(helpCommands)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal help commands metadata: %w", err)
 	}
 
 	commandsMetadata, err := json.Marshal(buildCommandsHeaderMetadata(slashRoutesByCommand, labelRoutesByCommand))
@@ -333,6 +403,9 @@ jobs:
         env:
           GH_AW_SLASH_ROUTING: '` + escapeYAMLSingleQuoted(string(slashRoutesJSON)) + `'
           GH_AW_LABEL_ROUTING: '` + escapeYAMLSingleQuoted(string(labelRoutesJSON)) + `'
+          GH_AW_HELP_COMMANDS: '` + escapeYAMLSingleQuoted(string(helpCommandsJSON)) + `'
+          GH_AW_HELP_COMMAND_ENABLED: '` + strconv.FormatBool(helpCommandEnabled) + `'
+          GH_AW_SLASH_COMMAND_DOCS_URL: 'https://github.github.com/gh-aw/reference/command-triggers/'
         with:
           script: |
             const { setupGlobals } = require('` + SetupActionDestination + `/setup_globals.cjs');
@@ -341,6 +414,130 @@ jobs:
             await main();
 `)
 	return b.String(), nil
+}
+
+func buildHelpCommandEntries(workflowDataList []*WorkflowData) []helpCommandEntry {
+	type aggregate struct {
+		Description   string
+		DescriptionBy string
+		SourceFile    string
+		Centralized   bool
+		Decentralized bool
+		Label         bool
+	}
+	byCommand := make(map[string]aggregate)
+	byLabel := make(map[string]aggregate)
+
+	for _, wd := range workflowDataList {
+		if wd == nil || (len(wd.Command) == 0 && len(wd.LabelCommand) == 0) {
+			continue
+		}
+		description := strings.TrimSpace(wd.Description)
+
+		for _, commandName := range wd.Command {
+			trimmed := strings.TrimSpace(commandName)
+			if trimmed == "" {
+				continue
+			}
+			if trimmed == "help" {
+				centralSlashCommandWorkflowLog.Printf(
+					"Warning: 'help' is reserved for the builtin /help handler in workflow %s; "+
+						"this command will not be dispatched unless help_command is disabled via aw.json",
+					wd.WorkflowID,
+				)
+			}
+			existing := byCommand[trimmed]
+			if existing.Description != "" && description != "" && existing.Description != description {
+				centralSlashCommandWorkflowLog.Printf(
+					"Conflicting descriptions for /%s: keeping %q from workflow %s, ignoring %q from workflow %s",
+					trimmed,
+					existing.Description,
+					existing.DescriptionBy,
+					description,
+					wd.WorkflowID,
+				)
+			}
+			// Conflict resolution keeps the first non-empty description encountered
+			// while iterating workflowDataList, which is deterministic for compilation.
+			if existing.Description == "" && description != "" {
+				existing.Description = description
+				existing.DescriptionBy = wd.WorkflowID
+			}
+			if existing.SourceFile == "" {
+				existing.SourceFile = wd.WorkflowID
+			}
+			if wd.CommandCentralized {
+				existing.Centralized = true
+			} else {
+				// Slash commands are either centralized or decentralized in current workflow metadata:
+				// CommandCentralized=false indicates the command is handled in its own workflow.
+				existing.Decentralized = true
+			}
+			byCommand[trimmed] = existing
+		}
+
+		for _, labelName := range wd.LabelCommand {
+			trimmed := strings.TrimSpace(labelName)
+			if trimmed == "" {
+				continue
+			}
+			existing := byLabel[trimmed]
+			if existing.Description != "" && description != "" && existing.Description != description {
+				centralSlashCommandWorkflowLog.Printf(
+					"Conflicting descriptions for label %q: keeping %q from workflow %s, ignoring %q from workflow %s",
+					trimmed,
+					existing.Description,
+					existing.DescriptionBy,
+					description,
+					wd.WorkflowID,
+				)
+			}
+			if existing.Description == "" && description != "" {
+				existing.Description = description
+				existing.DescriptionBy = wd.WorkflowID
+			}
+			if existing.SourceFile == "" {
+				existing.SourceFile = wd.WorkflowID
+			}
+			existing.Label = true
+			byLabel[trimmed] = existing
+		}
+	}
+
+	commands := make([]string, 0, len(byCommand))
+	for command := range byCommand {
+		commands = append(commands, command)
+	}
+	sort.Strings(commands)
+
+	labels := make([]string, 0, len(byLabel))
+	for labelName := range byLabel {
+		labels = append(labels, labelName)
+	}
+	sort.Strings(labels)
+
+	entries := make([]helpCommandEntry, 0, len(commands)+len(labels))
+	for _, command := range commands {
+		item := byCommand[command]
+		entries = append(entries, helpCommandEntry{
+			Command:       command,
+			Description:   item.Description,
+			Centralized:   item.Centralized,
+			Decentralized: item.Decentralized,
+			SourceFile:    item.SourceFile,
+		})
+	}
+	for _, labelName := range labels {
+		item := byLabel[labelName]
+		entries = append(entries, helpCommandEntry{
+			Command:     labelName,
+			Description: item.Description,
+			Label:       true,
+			SourceFile:  item.SourceFile,
+		})
+	}
+
+	return entries
 }
 
 func writeCentralRouteSummaryComments(b *strings.Builder, slashRoutesByCommand map[string][]slashCommandRoute, labelRoutesByCommand map[string][]slashCommandRoute) {
@@ -437,19 +634,22 @@ func needsPullRequestsPermission(mergedEvents map[string]map[string]bool) bool {
 
 func buildCommandsHeaderMetadata(slashRoutesByCommand map[string][]slashCommandRoute, labelRoutesByCommand map[string][]slashCommandRoute) commandsHeaderMetadata {
 	commands := make([]string, 0, len(slashRoutesByCommand))
-	workflowSet := make(map[string]bool)
+	workflowSet := make(map[string]struct {
+	})
 	for command, routes := range slashRoutesByCommand {
 		commands = append(commands, command)
 		for _, route := range routes {
 			if route.Workflow != "" {
-				workflowSet[route.Workflow] = true
+				workflowSet[route.Workflow] = struct {
+				}{}
 			}
 		}
 	}
 	for _, routes := range labelRoutesByCommand {
 		for _, route := range routes {
 			if route.Workflow != "" {
-				workflowSet[route.Workflow] = true
+				workflowSet[route.Workflow] = struct {
+				}{}
 			}
 		}
 	}
@@ -485,7 +685,7 @@ func resolveCentralSlashRunsOn(workflowDataList []*WorkflowData) string {
 
 		resolved := constants.DefaultActivationJobRunnerImage
 		if wd.SafeOutputs != nil && strings.TrimSpace(wd.SafeOutputs.RunsOn) != "" {
-			resolved = strings.TrimSpace(wd.SafeOutputs.RunsOn)
+			resolved = formatRunsOnSnippetForInlineValue(wd.SafeOutputs.RunsOn)
 		} else if strings.TrimSpace(wd.RunsOnSlim) != "" {
 			resolved = formatRunsOnSnippetForInlineValue(wd.RunsOnSlim)
 		}
@@ -550,17 +750,4 @@ func writeCentralSlashEventsYAML(b *strings.Builder, mergedEvents map[string]map
 		b.WriteString("  " + eventName + ":\n")
 		b.WriteString("    types: [" + strings.Join(types, ", ") + "]\n")
 	}
-}
-
-func uniqueSorted(values []string) []string {
-	seen := make(map[string]bool, len(values))
-	for _, v := range values {
-		seen[v] = true
-	}
-	result := make([]string, 0, len(seen))
-	for v := range seen {
-		result = append(result, v)
-	}
-	sort.Strings(result)
-	return result
 }

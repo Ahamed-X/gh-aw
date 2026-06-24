@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "📅"
 description: Creates a narrative chronicle of daily repository activity including commits, PRs, issues, and discussions
 on:
@@ -51,6 +52,8 @@ imports:
       expires: 3d
   - shared/trends.md
   - shared/otlp.md
+features:
+  gh-aw-detection: true
 ---
 
 {{#runtime-import? .github/shared-instructions.md}}

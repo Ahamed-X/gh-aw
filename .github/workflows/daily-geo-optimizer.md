@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "🌍"
 description: Daily GEO (Generative Engine Optimization) audit of the README and documentation site using geo-optimizer-skill
 on:
@@ -38,7 +39,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6.0.3
+        uses: actions/checkout@v7.0.0
 
       - name: Setup Python
         uses: actions/setup-python@v6.2.0
@@ -107,6 +108,8 @@ imports:
       expires: 3d
 
   - shared/otlp.md
+features:
+  gh-aw-detection: true
 ---
 
 {{#runtime-import? .github/shared-instructions.md}}

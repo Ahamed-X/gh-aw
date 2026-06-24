@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "🏗️"
 name: Architecture Guardian
 description: Daily analysis of commits from the last 24 hours to detect code structure violations in Go and JavaScript files, such as large files, oversized functions, high export counts, and import cycles
@@ -147,7 +148,8 @@ steps:
 
       FILE_COUNT=$(echo "$CHANGED_FILES" | wc -l | tr -d ' ')
       echo "✅ Pre-computed metrics for $FILE_COUNT file(s) → /tmp/gh-aw/agent/arch-metrics.json"
-
+features:
+  gh-aw-detection: true
 ---
 
 # Architecture Guardian

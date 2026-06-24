@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "🧪"
 description: Smoke test workflow that validates Antigravity engine functionality twice daily
 on:
@@ -69,7 +70,8 @@ safe-outputs:
       run-success: "🚀 [{workflow_name}]({run_url}) **MISSION COMPLETE!** Antigravity has spoken. ✨"
       run-failure: "⚠️ [{workflow_name}]({run_url}) {status}. Antigravity encountered unexpected challenges..."
 timeout-minutes: 10
-
+features:
+  gh-aw-detection: true
 ---
 
 # Smoke Test: Antigravity Engine Validation

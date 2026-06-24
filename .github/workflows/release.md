@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "🚀"
 name: Release
 description: Build, test, and release gh-aw extension, then generate and prepend release highlights
@@ -41,7 +42,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6.0.3
+        uses: actions/checkout@v7.0.0
         with:
           persist-credentials: false
       - name: Validate container SHA pins in actions-lock.json files
@@ -107,7 +108,7 @@ jobs:
       release_tag: ${{ steps.compute_config.outputs.release_tag }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6.0.3
+        uses: actions/checkout@v7.0.0
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -234,7 +235,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6.0.3
+        uses: actions/checkout@v7.0.0
         with:
           fetch-depth: 0
           persist-credentials: true
@@ -495,9 +496,27 @@ jobs:
             # ScanType 3 = custom scan. Use -File to scan only the copied binary.
             # Capture output (2>&1 merges stderr into the output stream so all
             # MpCmdRun messages are available for strict failure checks below.
-            $output = & $mpCmdRun -Scan -ScanType 3 -File $binaryPath -DisableRemediation 2>&1 | ForEach-Object { "$_" }
-            $scanExitCode = $LASTEXITCODE
-            $outputText = @($output) -join "`n"
+            # Retry on transient service errors (e.g. WinDefend in StopPending state,
+            # hr = 0x800106ba) which can occur transiently on Windows runners.
+            $scanAttempts = 3
+            $scanDelaySeconds = 15
+            $output = $null
+            $scanExitCode = 0
+            $outputText = ""
+            for ($scanAttempt = 1; $scanAttempt -le $scanAttempts; $scanAttempt++) {
+              if ($scanAttempt -gt 1) {
+                Write-Host "Retrying Microsoft Defender scan for $($binary.Name) (attempt $scanAttempt/$scanAttempts)..."
+              }
+              $output = & $mpCmdRun -Scan -ScanType 3 -File $binaryPath -DisableRemediation 2>&1 | ForEach-Object { "$_" }
+              $scanExitCode = $LASTEXITCODE
+              $outputText = @($output) -join "`n"
+              $isTransientError = $scanExitCode -ne 0 -and $outputText -imatch "0x800106ba"
+              if (-not $isTransientError -or $scanAttempt -eq $scanAttempts) {
+                break
+              }
+              Write-Warning "Defender scan failed with a transient service error (attempt $scanAttempt/$scanAttempts). Retrying in $scanDelaySeconds seconds..."
+              Start-Sleep -Seconds $scanDelaySeconds
+            }
 
             Write-Host "=== MpCmdRun output ==="
             $output | ForEach-Object { Write-Host $_ }
@@ -564,7 +583,7 @@ jobs:
           fi
 
       - name: Checkout repository
-        uses: actions/checkout@v6.0.3
+        uses: actions/checkout@v7.0.0
         with:
           fetch-depth: 0
           persist-credentials: true

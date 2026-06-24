@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "🧪"
 name: Smoke Project
 description: Smoke Project - Test project operations
@@ -88,6 +89,8 @@ experiments:
       issue: 37302
 imports:
   - shared/otlp.md
+features:
+  gh-aw-detection: true
 ---
 
 # Smoke Test: Project Operations Validation

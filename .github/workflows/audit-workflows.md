@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "🔍"
 description: Daily audit of all agentic workflow runs from the last 24 hours to identify issues, missing tools, errors, and improvement opportunities
 on:
@@ -36,6 +37,8 @@ imports:
 
 
   - shared/otlp.md
+features:
+  gh-aw-detection: true
 ---
 
 # Agentic Workflow Audit Agent

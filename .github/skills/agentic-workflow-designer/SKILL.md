@@ -145,6 +145,7 @@ Present a structured summary and ask for approval before generation.
 | "request reviewer", "hide comment" | `add-reviewer`, `hide-comment` |
 | "create/update project", "project status update" | `create-project`, `update-project`, `create-project-status-update` |
 | "update release", "upload release asset" | `update-release`, `upload-asset` |
+| "trigger another workflow", "dispatch to workflow", "run another workflow" | `dispatch-workflow` |
 | "create/auto-fix code scan alert" | `create-code-scanning-alert`, `autofix-code-scanning-alert` |
 | "start an agent session", "assign to an agent" | `create-agent-session`, `assign-to-agent` |
 | "store persistent memory comment" | `comment-memory` |
@@ -157,9 +158,44 @@ Present a structured summary and ask for approval before generation.
 | User says... | Maps to |
 |---|---|
 | "calls an external API" | ask for exact FQDN/wildcard, then add to `network.allowed` |
+| "reads GitHub data / clones repos" | include `github` in `network.allowed` |
+| "uses GitHub Actions artifacts or cache" | include `github-actions` in `network.allowed` |
 | "installs npm packages" | include `node` in `network.allowed` |
 | "runs pip install" | include `python` in `network.allowed` |
 | "builds Go code" | include `go` in `network.allowed` |
+| "installs gems / uses Bundler" | include `ruby` in `network.allowed` |
+| "runs cargo build" | include `rust` in `network.allowed` |
+| "uses NuGet / .NET restore" | include `dotnet` in `network.allowed` |
+| "builds with Maven / Gradle" | include `java` in `network.allowed` |
+| "uses Docker / pulls container images / pushes to GHCR" | include `containers` in `network.allowed` |
+| "runs Playwright browser tests" | include `playwright` in `network.allowed` |
+| "runs apt install / yum / apk" | include `linux-distros` in `network.allowed` |
+| "uses Terraform / HashiCorp registry" | include `terraform` in `network.allowed` |
+| "connects to localhost / loopback / local services" | include `local` in `network.allowed` |
+| "uses Swift Package Manager" | include `swift` in `network.allowed` |
+| "uses Composer / PHP packages" | include `php` in `network.allowed` |
+| "uses pub.dev / Dart packages" | include `dart` in `network.allowed` |
+| "uses Hackage / Haskell packages" | include `haskell` in `network.allowed` |
+| "uses CPAN / Perl packages" | include `perl` in `network.allowed` |
+| "serves or loads web fonts" | include `fonts` in `network.allowed` |
+| "uses Deno or JSR packages" | include `deno` in `network.allowed` |
+| "uses Elixir / Hex packages" | include `elixir` in `network.allowed` |
+| "uses Bazel build" | include `bazel` in `network.allowed` |
+| "uses Clojure / Clojars packages" | include `clojure` in `network.allowed` |
+| "uses Julia packages" | include `julia` in `network.allowed` |
+| "uses Kotlin / JetBrains packages" | include `kotlin` in `network.allowed` |
+| "uses LuaRocks / Lua packages" | include `lua` in `network.allowed` |
+| "uses node CDNs (jsdelivr, unpkg)" | include `node-cdns` in `network.allowed` |
+| "uses OPAM / OCaml packages" | include `ocaml` in `network.allowed` |
+| "uses PowerShell Gallery" | include `powershell` in `network.allowed` |
+| "uses R / CRAN packages" | include `r` in `network.allowed` |
+| "uses sbt / Scala packages" | include `scala` in `network.allowed` |
+| "uses Zig packages" | include `zig` in `network.allowed` |
+| "uses Renovate, Codecov, or other CI tools" | include `dev-tools` in `network.allowed` |
+| "uses Chrome / Chromium downloads" | include `chrome` in `network.allowed` |
+| "uses LaTeX / TeX / MiKTeX" | include `latex` in `network.allowed` |
+| "uses Lean theorem prover" | include `lean` in `network.allowed` |
+| "builds Python packages from source" | include `python-native` in `network.allowed` |
 | "no external access" | `network.allowed: [defaults]` (or `[]` if explicitly zero network) |
 
 ### Tool Mapping
@@ -184,6 +220,19 @@ Present a structured summary and ask for approval before generation.
 | "monitor workflow failures and trends" | `MonitorOps` |
 | "process a big backlog in chunks" | `BatchOps` |
 | "run manually with input parameters" | `DispatchOps` |
+| "apply a label-based workflow" | `LabelOps` |
+| "operate across multiple repositories" | `MultiRepoOps` |
+| "coordinate multiple sub-agents" | `Orchestration` |
+| "manage project board items" | `ProjectOps` |
+| "research, plan, and assign issues" | `ResearchPlanAssignOps` |
+| "self-correcting / retry on failure" | `CorrectionOps` |
+| "run in a side/fork repo" | `SideRepoOps` |
+| "write a spec before implementing" | `SpecOps` |
+| "A/B test workflow variants" | `TrialOps` |
+| "process items from a queue" | `WorkQueueOps` |
+| "deterministic, no LLM needed" | `DeterministicOps` |
+| "manage from a central repo" | `CentralRepoOps` |
+| "track work via GitHub Projects" | `Monitoring with Projects` |
 
 ### Integration Auth Mapping
 
@@ -334,5 +383,7 @@ Portable HTTPS references:
 - `https://github.com/github/gh-aw/blob/main/.github/aw/safe-outputs.md` (index → `.../safe-outputs-content.md`, `.../safe-outputs-management.md`, `.../safe-outputs-automation.md`, `.../safe-outputs-runtime.md`)
 - `https://github.com/github/gh-aw/blob/main/.github/aw/network.md`
 - `https://github.com/github/gh-aw/blob/main/.github/aw/patterns.md`
+- `https://github.com/github/gh-aw/blob/main/.github/aw/subagents.md`
+- `https://github.com/github/gh-aw/blob/main/.github/aw/token-optimization.md`
 - `https://github.com/github/gh-aw/blob/main/.github/aw/triggers.md`
 - `https://github.com/github/gh-aw/blob/main/.github/aw/create-agentic-workflow.md`

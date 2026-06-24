@@ -394,8 +394,27 @@ func (c *Compiler) buildConclusionJob(data *WorkflowData, mainJobName string, sa
 	}
 
 	// Pass report-failure-as-issue configuration flag (defaults to true if not specified)
-	if data.SafeOutputs != nil && data.SafeOutputs.ReportFailureAsIssue != nil && !*data.SafeOutputs.ReportFailureAsIssue {
-		agentFailureEnvVars = append(agentFailureEnvVars, "          GH_AW_FAILURE_REPORT_AS_ISSUE: \"false\"\n")
+	// Supports both bool and array of category strings (with ! prefix for exclusions)
+	if data.SafeOutputs != nil && data.SafeOutputs.ReportFailureAsIssue != nil {
+		if reportBool, ok := data.SafeOutputs.ReportFailureAsIssue.(bool); ok && !reportBool {
+			agentFailureEnvVars = append(agentFailureEnvVars, "          GH_AW_FAILURE_REPORT_AS_ISSUE: \"false\"\n")
+		} else {
+			agentFailureEnvVars = append(agentFailureEnvVars, "          GH_AW_FAILURE_REPORT_AS_ISSUE: \"true\"\n")
+			// If included categories filter is configured, pass it as JSON
+			if len(data.SafeOutputs.ReportFailureAsIssueCategories) > 0 {
+				categoriesJSON, err := json.Marshal(data.SafeOutputs.ReportFailureAsIssueCategories)
+				if err == nil {
+					agentFailureEnvVars = append(agentFailureEnvVars, fmt.Sprintf("          GH_AW_FAILURE_CATEGORIES_FILTER: %q\n", string(categoriesJSON)))
+				}
+			}
+			// If excluded categories filter is configured, pass it as JSON
+			if len(data.SafeOutputs.ReportFailureAsIssueExcludedCategories) > 0 {
+				excludedCategoriesJSON, err := json.Marshal(data.SafeOutputs.ReportFailureAsIssueExcludedCategories)
+				if err == nil {
+					agentFailureEnvVars = append(agentFailureEnvVars, fmt.Sprintf("          GH_AW_FAILURE_EXCLUDED_CATEGORIES_FILTER: %q\n", string(excludedCategoriesJSON)))
+				}
+			}
+		}
 	} else {
 		agentFailureEnvVars = append(agentFailureEnvVars, "          GH_AW_FAILURE_REPORT_AS_ISSUE: \"true\"\n")
 	}
@@ -427,11 +446,15 @@ func (c *Compiler) buildConclusionJob(data *WorkflowData, mainJobName string, sa
 		agentFailureEnvVars = append(agentFailureEnvVars, fmt.Sprintf("          GH_AW_TIMEOUT_MINUTES: %q\n", timeoutValue))
 	}
 
-	// Pass cache-memory availability flag so the failure handler can detect cache-miss
-	// misconfigurations: a cache_miss reported by the agent despite cache-memory being available
-	// indicates the prompt is referencing an incorrect file path within the cache directory.
+	// Pass cache-memory availability and restore outputs so the failure handler can detect
+	// cache-miss misconfigurations only after a restore match (and avoid first-run/branch-scoped
+	// false positives when no cache entry is restored).
 	if data.CacheMemoryConfig != nil && len(data.CacheMemoryConfig.Caches) > 0 {
 		agentFailureEnvVars = append(agentFailureEnvVars, "          GH_AW_CACHE_MEMORY_ENABLED: \"true\"\n")
+		for i := range data.CacheMemoryConfig.Caches {
+			agentFailureEnvVars = append(agentFailureEnvVars, fmt.Sprintf("          GH_AW_CACHE_MEMORY_RESTORE_%d_MATCHED_KEY: ${{ needs.%s.outputs.cache_memory_restore_%d_matched_key || '' }}\n", i, mainJobName, i))
+			agentFailureEnvVars = append(agentFailureEnvVars, fmt.Sprintf("          GH_AW_CACHE_MEMORY_RESTORE_%d_CACHE_HIT: ${{ needs.%s.outputs.cache_memory_restore_%d_cache_hit || 'false' }}\n", i, mainJobName, i))
+		}
 	}
 
 	// Build the agent failure handling step.
@@ -656,7 +679,7 @@ func (c *Compiler) buildConclusionJob(data *WorkflowData, mainJobName string, sa
 }
 
 // buildUsageArtifactUploadSteps creates steps that collect and upload a compact usage artifact.
-// The artifact includes aw-info.jsonl, agent_usage.jsonl, detection_usage.jsonl, and agent/detection token usage JSONL files (when present).
+// The artifact includes aw_info.json, aw-info.jsonl, agent_usage.json, agent_usage.jsonl, detection_usage.jsonl, and agent/detection token usage JSONL files (when present).
 func buildUsageArtifactUploadSteps(prefix string, pinAction func(string) string) []string {
 	usageArtifactName := prefix + "usage"
 	return []string{
@@ -666,12 +689,15 @@ func buildUsageArtifactUploadSteps(prefix string, pinAction func(string) string)
 		"        run: |\n",
 		"          mkdir -p /tmp/gh-aw/usage/agent /tmp/gh-aw/usage/detection\n",
 		"          echo \"Usage artifact source file status:\"\n",
-		"          for file in /tmp/gh-aw/aw-info.jsonl /tmp/gh-aw/agent_usage.jsonl /tmp/gh-aw/detection_usage.jsonl /tmp/gh-aw/sandbox/firewall-audit-logs/api-proxy-logs/token-usage.jsonl /tmp/gh-aw/sandbox/firewall/logs/api-proxy-logs/token-usage.jsonl /tmp/gh-aw/sandbox/firewall/audit/api-proxy-logs/token-usage.jsonl /tmp/gh-aw/threat-detection/sandbox/firewall-audit-logs/api-proxy-logs/token-usage.jsonl /tmp/gh-aw/threat-detection/sandbox/firewall/logs/api-proxy-logs/token-usage.jsonl /tmp/gh-aw/threat-detection/sandbox/firewall/audit/api-proxy-logs/token-usage.jsonl; do\n",
+		"          for file in /tmp/gh-aw/aw_info.json /tmp/gh-aw/aw-info.jsonl /tmp/gh-aw/agent_usage.json /tmp/gh-aw/agent_usage.jsonl /tmp/gh-aw/detection_usage.jsonl /tmp/gh-aw/github_rate_limits.jsonl /tmp/gh-aw/sandbox/firewall-audit-logs/api-proxy-logs/token-usage.jsonl /tmp/gh-aw/sandbox/firewall/logs/api-proxy-logs/token-usage.jsonl /tmp/gh-aw/sandbox/firewall/audit/api-proxy-logs/token-usage.jsonl /tmp/gh-aw/threat-detection/sandbox/firewall-audit-logs/api-proxy-logs/token-usage.jsonl /tmp/gh-aw/threat-detection/sandbox/firewall/logs/api-proxy-logs/token-usage.jsonl /tmp/gh-aw/threat-detection/sandbox/firewall/audit/api-proxy-logs/token-usage.jsonl; do\n",
 		"            [ -f \"$file\" ] && echo \"FOUND: $file\" || echo \"MISSING: $file\"\n",
 		"          done\n",
+		"          [ -f /tmp/gh-aw/aw_info.json ] && cp /tmp/gh-aw/aw_info.json /tmp/gh-aw/usage/aw_info.json || true\n",
 		"          [ -f /tmp/gh-aw/aw-info.jsonl ] && cp /tmp/gh-aw/aw-info.jsonl /tmp/gh-aw/usage/aw-info.jsonl || true\n",
+		"          [ -f /tmp/gh-aw/agent_usage.json ] && cp /tmp/gh-aw/agent_usage.json /tmp/gh-aw/usage/agent_usage.json || true\n",
 		"          [ -f /tmp/gh-aw/agent_usage.jsonl ] && cp /tmp/gh-aw/agent_usage.jsonl /tmp/gh-aw/usage/agent_usage.jsonl || true\n",
 		"          [ -f /tmp/gh-aw/detection_usage.jsonl ] && cp /tmp/gh-aw/detection_usage.jsonl /tmp/gh-aw/usage/detection_usage.jsonl || true\n",
+		"          [ -f /tmp/gh-aw/github_rate_limits.jsonl ] && cp /tmp/gh-aw/github_rate_limits.jsonl /tmp/gh-aw/usage/github_rate_limits.jsonl || true\n",
 		"          [ -f /tmp/gh-aw/sandbox/firewall-audit-logs/api-proxy-logs/token-usage.jsonl ] && cp /tmp/gh-aw/sandbox/firewall-audit-logs/api-proxy-logs/token-usage.jsonl /tmp/gh-aw/usage/agent/token_usage.jsonl || true\n",
 		"          [ -f /tmp/gh-aw/sandbox/firewall/logs/api-proxy-logs/token-usage.jsonl ] && cp /tmp/gh-aw/sandbox/firewall/logs/api-proxy-logs/token-usage.jsonl /tmp/gh-aw/usage/agent/token_usage.jsonl || true\n",
 		"          [ -f /tmp/gh-aw/sandbox/firewall/audit/api-proxy-logs/token-usage.jsonl ] && cp /tmp/gh-aw/sandbox/firewall/audit/api-proxy-logs/token-usage.jsonl /tmp/gh-aw/usage/agent/token_usage.jsonl || true\n",
@@ -680,6 +706,8 @@ func buildUsageArtifactUploadSteps(prefix string, pinAction func(string) string)
 		"          [ -f /tmp/gh-aw/threat-detection/sandbox/firewall/audit/api-proxy-logs/token-usage.jsonl ] && cp /tmp/gh-aw/threat-detection/sandbox/firewall/audit/api-proxy-logs/token-usage.jsonl /tmp/gh-aw/usage/detection/token_usage.jsonl || true\n",
 		"          [ -f /tmp/gh-aw/usage/agent/token_usage.jsonl ] || : > /tmp/gh-aw/usage/agent/token_usage.jsonl\n",
 		"          [ -f /tmp/gh-aw/usage/detection/token_usage.jsonl ] || : > /tmp/gh-aw/usage/detection/token_usage.jsonl\n",
+		"          mkdir -p /tmp/gh-aw/usage/activity\n",
+		fmt.Sprintf("          node %s/generate_usage_activity_summary.cjs\n", SetupActionDestination),
 		"          find /tmp/gh-aw/usage -type f -print | sort\n",
 		"      - name: Upload usage artifact\n",
 		"        if: always()\n",
@@ -688,11 +716,15 @@ func buildUsageArtifactUploadSteps(prefix string, pinAction func(string) string)
 		"        with:\n",
 		fmt.Sprintf("          name: %s\n", usageArtifactName),
 		"          path: |\n",
+		"            /tmp/gh-aw/usage/aw_info.json\n",
 		"            /tmp/gh-aw/usage/aw-info.jsonl\n",
+		"            /tmp/gh-aw/usage/agent_usage.json\n",
 		"            /tmp/gh-aw/usage/agent_usage.jsonl\n",
 		"            /tmp/gh-aw/usage/detection_usage.jsonl\n",
+		"            /tmp/gh-aw/usage/github_rate_limits.jsonl\n",
 		"            /tmp/gh-aw/usage/agent/token_usage.jsonl\n",
 		"            /tmp/gh-aw/usage/detection/token_usage.jsonl\n",
+		"            /tmp/gh-aw/usage/activity/summary.json\n",
 		"          if-no-files-found: ignore\n",
 	}
 }
@@ -738,6 +770,19 @@ func buildDailyAICUsageCacheSteps(data *WorkflowData, pinAction func(string) str
 		"        with:\n",
 		fmt.Sprintf("          key: %s\n", cacheKey),
 		"          path: /tmp/gh-aw/agentic-workflow-usage-cache.jsonl\n",
+		// Upload the cache file as an artifact so the activation job's artifact-based
+		// fallback can retrieve it on a different PR branch where actions/cache is
+		// branch-scoped and would otherwise always miss.
+		"      - name: Upload daily AIC usage cache artifact\n",
+		"        id: upload-daily-aic-cache\n",
+		"        if: always()\n",
+		"        continue-on-error: true\n",
+		fmt.Sprintf("        uses: %s\n", pinAction("actions/upload-artifact")),
+		"        with:\n",
+		"          name: aic-usage-cache\n",
+		"          path: /tmp/gh-aw/agentic-workflow-usage-cache.jsonl\n",
+		"          if-no-files-found: ignore\n",
+		"          retention-days: 7\n",
 	}
 }
 

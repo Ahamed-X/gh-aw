@@ -14,6 +14,7 @@ describe("handle_agent_failure", () => {
   let buildSecretVerificationContext;
   let getActionFailureIssueExpiresHours;
   const ENGINE_RATE_LIMIT_TEMPLATE = "> [!WARNING]\n> **Engine Rate Limited (HTTP 429)**\n> OTLP telemetry\n> {engine_label}\n";
+  const ENGINE_MAX_RUNS_EXCEEDED_TEMPLATE = "> [!WARNING]\n> **Engine Max Runs Exceeded**\n> max-runs guardrail\n> {engine_label}\n";
 
   beforeEach(() => {
     // Provide minimal GitHub Actions globals expected by require-time code
@@ -2030,6 +2031,7 @@ describe("handle_agent_failure", () => {
       promptsDir = path.join(tmpDir, "gh-aw", "prompts");
       fs.mkdirSync(promptsDir, { recursive: true });
       fs.writeFileSync(path.join(promptsDir, "engine_rate_limit_429.md"), ENGINE_RATE_LIMIT_TEMPLATE);
+      fs.writeFileSync(path.join(promptsDir, "engine_max_runs_exceeded.md"), ENGINE_MAX_RUNS_EXCEEDED_TEMPLATE);
       process.env.GH_AW_AGENT_OUTPUT = path.join(tmpDir, "agent_output.json");
       process.env.RUNNER_TEMP = tmpDir;
       ({ buildEngineFailureContext } = require("./handle_agent_failure.cjs"));
@@ -2075,6 +2077,22 @@ describe("handle_agent_failure", () => {
       const result = buildEngineFailureContext();
       expect(result).toContain("Engine Rate Limited (HTTP 429)");
       expect(result).toContain("OTLP telemetry");
+      expect(result).not.toContain("Last agent output");
+    });
+
+    it("returns dedicated context for max-runs guardrail failures in stdio logs", () => {
+      fs.writeFileSync(stdioLogPath, '[ERROR] API error (attempt 1/11): {"error":{"type":"max_runs_exceeded","message":"Maximum LLM invocations exceeded (50 / 50)."}}\n');
+      const result = buildEngineFailureContext();
+      expect(result).toContain("Engine Max Runs Exceeded");
+      expect(result).toContain("max-runs guardrail");
+      expect(result).not.toContain("Last agent output");
+    });
+
+    it("returns dedicated context when only max-runs message text is present", () => {
+      fs.writeFileSync(stdioLogPath, "Maximum LLM invocations exceeded (50 / 50).\n");
+      const result = buildEngineFailureContext();
+      expect(result).toContain("Engine Max Runs Exceeded");
+      expect(result).toContain("max-runs guardrail");
       expect(result).not.toContain("Last agent output");
     });
 
@@ -2353,6 +2371,89 @@ describe("handle_agent_failure", () => {
   });
 
   // ──────────────────────────────────────────────────────
+  // hasEngineMaxRunsExceededSignal
+  // ──────────────────────────────────────────────────────
+
+  describe("hasEngineMaxRunsExceededSignal", () => {
+    let hasEngineMaxRunsExceededSignal;
+
+    beforeEach(() => {
+      vi.resetModules();
+      ({ hasEngineMaxRunsExceededSignal } = require("./handle_agent_failure.cjs"));
+    });
+
+    it("returns false for empty-like content", () => {
+      expect(hasEngineMaxRunsExceededSignal("")).toBe(false);
+      expect(hasEngineMaxRunsExceededSignal(null)).toBe(false);
+      expect(hasEngineMaxRunsExceededSignal(undefined)).toBe(false);
+    });
+
+    it("returns true when max_runs_exceeded marker is present", () => {
+      expect(hasEngineMaxRunsExceededSignal('{"error":{"type":"max_runs_exceeded"}}')).toBe(true);
+    });
+
+    it("returns true when Maximum LLM invocations exceeded text is present", () => {
+      expect(hasEngineMaxRunsExceededSignal("Maximum LLM invocations exceeded (50 / 50).")).toBe(true);
+    });
+
+    it("returns false for unrelated content", () => {
+      expect(hasEngineMaxRunsExceededSignal("request failed for unrelated reason")).toBe(false);
+    });
+  });
+
+  // ──────────────────────────────────────────────────────
+  // buildEngineMaxRunsExceededContext
+  // ──────────────────────────────────────────────────────
+
+  describe("buildEngineMaxRunsExceededContext", () => {
+    let buildEngineMaxRunsExceededContext;
+    const fs = require("fs");
+    const path = require("path");
+    const os = require("os");
+
+    /** @type {string} */
+    let tmpDir;
+
+    /** @type {string} */
+    let promptsDir;
+
+    beforeEach(() => {
+      vi.resetModules();
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "aw-test-engine-max-runs-"));
+      promptsDir = path.join(tmpDir, "gh-aw", "prompts");
+      fs.mkdirSync(promptsDir, { recursive: true });
+      process.env.RUNNER_TEMP = tmpDir;
+      ({ buildEngineMaxRunsExceededContext } = require("./handle_agent_failure.cjs"));
+      fs.writeFileSync(path.join(promptsDir, "engine_max_runs_exceeded.md"), ENGINE_MAX_RUNS_EXCEEDED_TEMPLATE);
+    });
+
+    afterEach(() => {
+      delete process.env.RUNNER_TEMP;
+      if (fs.existsSync(tmpDir)) {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("renders template content for a provided engine label", () => {
+      const result = buildEngineMaxRunsExceededContext("Claude");
+      expect(result).toContain("Engine Max Runs Exceeded");
+      expect(result).toContain("max-runs guardrail");
+      expect(result).toContain("Claude");
+    });
+
+    it("falls back to AI when engine label is empty or whitespace", () => {
+      expect(buildEngineMaxRunsExceededContext("")).toContain("AI");
+      expect(buildEngineMaxRunsExceededContext("   ")).toContain("AI");
+    });
+
+    it("trims leading/trailing whitespace from engine label", () => {
+      const result = buildEngineMaxRunsExceededContext("  copilot  ");
+      expect(result).toContain("copilot");
+      expect(result).not.toContain("  copilot  ");
+    });
+  });
+
+  // ──────────────────────────────────────────────────────
   // buildEngineRateLimit429Context
   // ──────────────────────────────────────────────────────
 
@@ -2547,6 +2648,37 @@ describe("handle_agent_failure", () => {
   });
   // ──────────────────────────────────────────────────────
 
+  describe("resolveCacheMemoryRestored", () => {
+    let resolveCacheMemoryRestored;
+
+    beforeEach(() => {
+      vi.resetModules();
+      ({ resolveCacheMemoryRestored } = require("./handle_agent_failure.cjs"));
+    });
+
+    afterEach(() => {
+      for (const key of Object.keys(process.env)) {
+        if (key.startsWith("GH_AW_CACHE_MEMORY_RESTORE_")) {
+          delete process.env[key];
+        }
+      }
+    });
+
+    it("returns false when restore signals are absent", () => {
+      expect(resolveCacheMemoryRestored()).toBe(false);
+    });
+
+    it("returns true when matched key exists", () => {
+      process.env.GH_AW_CACHE_MEMORY_RESTORE_0_MATCHED_KEY = "memory-none-default";
+      expect(resolveCacheMemoryRestored()).toBe(true);
+    });
+
+    it("returns true when cache-hit is true", () => {
+      process.env.GH_AW_CACHE_MEMORY_RESTORE_1_CACHE_HIT = "true";
+      expect(resolveCacheMemoryRestored()).toBe(true);
+    });
+  });
+
   describe("buildMissingDataContext", () => {
     let buildMissingDataContext;
     const fs = require("fs");
@@ -2578,16 +2710,16 @@ describe("handle_agent_failure", () => {
     });
 
     it("returns empty string when agent output file does not exist", () => {
-      expect(buildMissingDataContext(false)).toBe("");
-      expect(buildMissingDataContext(true)).toBe("");
+      expect(buildMissingDataContext(false, false)).toBe("");
+      expect(buildMissingDataContext(true, false)).toBe("");
     });
 
     it("returns empty string when agent output has no missing_data items", () => {
       fs.writeFileSync(path.join(tmpDir, "agent_output.json"), JSON.stringify({ items: [{ type: "noop", reason: "done" }] }));
       vi.resetModules();
       ({ buildMissingDataContext } = require("./handle_agent_failure.cjs"));
-      expect(buildMissingDataContext(false)).toBe("");
-      expect(buildMissingDataContext(true)).toBe("");
+      expect(buildMissingDataContext(false, false)).toBe("");
+      expect(buildMissingDataContext(true, false)).toBe("");
     });
 
     it("returns missing data context without cache warning when cacheMemoryEnabled is false", () => {
@@ -2599,13 +2731,13 @@ describe("handle_agent_failure", () => {
       );
       vi.resetModules();
       ({ buildMissingDataContext } = require("./handle_agent_failure.cjs"));
-      const result = buildMissingDataContext(false);
+      const result = buildMissingDataContext(false, false);
       expect(result).toContain("Missing Data Reported");
       expect(result).toContain("cache\\_memory"); // data_type after markdown escaping
       expect(result).not.toContain("Cache Configuration Problem");
     });
 
-    it("appends cache configuration warning when cacheMemoryEnabled is true and cache_memory_miss item present", () => {
+    it("appends cache configuration warning when cache restore matched and cache_memory_miss item present", () => {
       fs.writeFileSync(
         path.join(tmpDir, "agent_output.json"),
         JSON.stringify({
@@ -2615,14 +2747,14 @@ describe("handle_agent_failure", () => {
       const templateContent =
         "> [!WARNING]\n" +
         "> <details>\n" +
-        "> <summary>Cache Configuration Problem: cache miss detected despite cache-memory being configured.</summary>\n>\n" +
+        "> <summary>Cache Configuration Problem: cache miss detected after cache restore succeeded.</summary>\n>\n" +
         "> Review the [cache-memory configuration](https://github.github.com/gh-aw/reference/cache-memory/) and ensure the agent prompt correctly references files inside the cache directory.\n>\n" +
         "> **File naming convention:** Cache files are stored at `/tmp/gh-aw/cache-memory/`.\n>\n" +
         "> </details>";
       fs.writeFileSync(path.join(promptsDir, "cache_memory_miss.md"), templateContent);
       vi.resetModules();
       ({ buildMissingDataContext } = require("./handle_agent_failure.cjs"));
-      const result = buildMissingDataContext(true);
+      const result = buildMissingDataContext(true, true);
       expect(result).not.toContain("Missing Data Reported");
       expect(result).toContain("Cache Configuration Problem");
       expect(result).toContain("> [!WARNING]");
@@ -2640,16 +2772,31 @@ describe("handle_agent_failure", () => {
           items: [{ type: "missing_data", reason: "cache_memory_miss" }],
         })
       );
-      const templateContent = "> [!WARNING]\n" + "> <details>\n" + "> <summary>Cache Configuration Problem: cache miss detected despite cache-memory being configured.</summary>\n>\n" + "> Details here.\n>\n" + "> </details>";
+      const templateContent = "> [!WARNING]\n" + "> <details>\n" + "> <summary>Cache Configuration Problem: cache miss detected after cache restore succeeded.</summary>\n>\n" + "> Details here.\n>\n" + "> </details>";
       fs.writeFileSync(path.join(promptsDir, "cache_memory_miss.md"), templateContent);
       vi.resetModules();
       ({ buildMissingDataContext } = require("./handle_agent_failure.cjs"));
-      const result = buildMissingDataContext(true);
+      const result = buildMissingDataContext(true, true);
       expect(result).not.toContain("Missing Data Reported");
       expect(result).toContain("Cache Configuration Problem");
       expect(result).toContain("> [!WARNING]");
       expect(result).toContain("<summary>");
       expect(result).toContain("<details>");
+    });
+
+    it("does not append cache configuration warning when cache restore did not match", () => {
+      fs.writeFileSync(
+        path.join(tmpDir, "agent_output.json"),
+        JSON.stringify({
+          items: [{ type: "missing_data", data_type: "cache_memory", reason: "cache_memory_miss" }],
+        })
+      );
+      vi.resetModules();
+      ({ buildMissingDataContext } = require("./handle_agent_failure.cjs"));
+      const result = buildMissingDataContext(true, false);
+      expect(result).toContain("Missing Data Reported");
+      expect(result).toContain("cache\\_memory");
+      expect(result).not.toContain("Cache Configuration Problem");
     });
 
     it("shows generic missing-data context for non-cache items while still appending cache warning", () => {
@@ -2662,11 +2809,11 @@ describe("handle_agent_failure", () => {
           ],
         })
       );
-      const templateContent = "> [!WARNING]\n> <details>\n> <summary>Cache Configuration Problem: cache miss detected despite cache-memory being configured.</summary>\n>\n> Details here.\n>\n> </details>";
+      const templateContent = "> [!WARNING]\n> <details>\n> <summary>Cache Configuration Problem: cache miss detected after cache restore succeeded.</summary>\n>\n> Details here.\n>\n> </details>";
       fs.writeFileSync(path.join(promptsDir, "cache_memory_miss.md"), templateContent);
       vi.resetModules();
       ({ buildMissingDataContext } = require("./handle_agent_failure.cjs"));
-      const result = buildMissingDataContext(true);
+      const result = buildMissingDataContext(true, true);
       expect(result).toContain("Missing Data Reported");
       expect(result).toContain("user\\_data");
       expect(result).toContain("Cache Configuration Problem");
@@ -2684,11 +2831,11 @@ describe("handle_agent_failure", () => {
           ],
         })
       );
-      const templateContent = "> [!WARNING]\n> <details>\n> <summary>Cache Configuration Problem: cache miss detected despite cache-memory being configured.</summary>\n>\n> Details here.\n>\n> </details>";
+      const templateContent = "> [!WARNING]\n> <details>\n> <summary>Cache Configuration Problem: cache miss detected after cache restore succeeded.</summary>\n>\n> Details here.\n>\n> </details>";
       fs.writeFileSync(path.join(promptsDir, "cache_memory_miss.md"), templateContent);
       vi.resetModules();
       const { buildMissingDataContext: buildMissingDataContextFn, buildReportIncompleteContext } = require("./handle_agent_failure.cjs");
-      const missingDataResult = buildMissingDataContextFn(true);
+      const missingDataResult = buildMissingDataContextFn(true, true);
       const reportIncompleteResult = buildReportIncompleteContext();
       expect(missingDataResult).not.toContain("Missing Data Reported");
       expect(missingDataResult).toContain("Cache Configuration Problem");
@@ -2705,7 +2852,7 @@ describe("handle_agent_failure", () => {
       );
       vi.resetModules();
       ({ buildMissingDataContext } = require("./handle_agent_failure.cjs"));
-      const result = buildMissingDataContext(true);
+      const result = buildMissingDataContext(true, true);
       expect(result).toContain("Missing Data Reported");
       expect(result).not.toContain("Cache Configuration Problem");
     });
@@ -3122,6 +3269,68 @@ describe("handle_agent_failure", () => {
           reason: "permission denied: read",
           recentToolCalls: ["edit", "bash", "grep", "glob", "write"],
           timestamp: "2026-06-06T00:00:07Z",
+        },
+      ]);
+    });
+
+    it("captures shell command details for recent bash tool calls", () => {
+      const sessionDir = path.join(os.tmpdir(), "gh-aw", "sandbox", "agent", "logs", "copilot-session-state", "session-1");
+      fs.mkdirSync(sessionDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(sessionDir, "events.jsonl"),
+        [
+          JSON.stringify({
+            type: "tool.execution_start",
+            timestamp: "2026-06-06T00:00:00Z",
+            data: { toolName: "bash", mcpServerName: "terminal", command: "cd /home/runner/work/gh-aw/gh-aw && git diff --name-only" },
+          }),
+          JSON.stringify({
+            type: "guard.tool_denials_exceeded",
+            timestamp: "2026-06-06T00:00:01Z",
+            data: { denialCount: 5, threshold: 5, reason: "permission denied: bash" },
+          }),
+        ].join("\n") + "\n"
+      );
+
+      const events = loadToolDenialsExceededEvents();
+      expect(events).toEqual([
+        {
+          denialCount: 5,
+          threshold: 5,
+          reason: "permission denied: bash",
+          recentToolCalls: ["terminal.bash(cd /home/runner/work/gh-aw/gh-aw && git diff --name-only)"],
+          timestamp: "2026-06-06T00:00:01Z",
+        },
+      ]);
+    });
+
+    it("sanitizes backticks in shell command previews", () => {
+      const sessionDir = path.join(os.tmpdir(), "gh-aw", "sandbox", "agent", "logs", "copilot-session-state", "session-1");
+      fs.mkdirSync(sessionDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(sessionDir, "events.jsonl"),
+        [
+          JSON.stringify({
+            type: "tool.execution_start",
+            timestamp: "2026-06-06T00:00:00Z",
+            data: { toolName: "bash", mcpServerName: "terminal", command: "echo `hostname` && echo ok" },
+          }),
+          JSON.stringify({
+            type: "guard.tool_denials_exceeded",
+            timestamp: "2026-06-06T00:00:01Z",
+            data: { denialCount: 5, threshold: 5, reason: "permission denied: bash" },
+          }),
+        ].join("\n") + "\n"
+      );
+
+      const events = loadToolDenialsExceededEvents();
+      expect(events).toEqual([
+        {
+          denialCount: 5,
+          threshold: 5,
+          reason: "permission denied: bash",
+          recentToolCalls: ["terminal.bash(echo 'hostname' && echo ok)"],
+          timestamp: "2026-06-06T00:00:01Z",
         },
       ]);
     });
@@ -4130,6 +4339,175 @@ describe("handle_agent_failure", () => {
 
       // Should not throw
       await expect(detectAndHandleFailureCascade("owner", "repo", 999)).resolves.toBeUndefined();
+    });
+  });
+
+  describe("failure categories generation", () => {
+    let buildFailureMatchCategories;
+
+    beforeEach(() => {
+      vi.resetModules();
+      ({ buildFailureMatchCategories } = require("./handle_agent_failure.cjs"));
+    });
+
+    it("returns expected categories for agent failure", () => {
+      const categories = buildFailureMatchCategories({
+        agentConclusion: "failure",
+        isTimedOut: false,
+      });
+      expect(categories).toContain("agent_failure");
+      expect(categories.length).toBeGreaterThan(0);
+    });
+
+    it("returns timed_out category", () => {
+      const categories = buildFailureMatchCategories({
+        isTimedOut: true,
+      });
+      expect(categories).toContain("timed_out");
+    });
+
+    it("returns missing_safe_outputs category", () => {
+      const categories = buildFailureMatchCategories({
+        hasMissingSafeOutputs: true,
+      });
+      expect(categories).toContain("missing_safe_outputs");
+    });
+
+    it("returns report_incomplete category", () => {
+      const categories = buildFailureMatchCategories({
+        hasReportIncomplete: true,
+      });
+      expect(categories).toContain("report_incomplete");
+    });
+
+    it("returns sorted categories", () => {
+      const categories = buildFailureMatchCategories({
+        hasMissingSafeOutputs: true,
+        isTimedOut: true,
+        hasReportIncomplete: true,
+      });
+      // Should be sorted alphabetically
+      for (let i = 1; i < categories.length; i++) {
+        expect(categories[i] >= categories[i - 1]).toBe(true);
+      }
+    });
+  });
+
+  describe("failure categories filter behavior", () => {
+    const fs = require("fs");
+    const path = require("path");
+    const os = require("os");
+
+    /** @type {string} */
+    let tmpDir;
+    /** @type {string} */
+    let promptsDir;
+
+    const setupGithubMock = () => {
+      const createIssueMock = vi.fn(async () => ({
+        data: { number: 101, html_url: "https://github.com/owner/repo/issues/101", node_id: "I_101" },
+      }));
+
+      global.github = {
+        rest: {
+          search: {
+            issuesAndPullRequests: vi.fn(async ({ q }) => {
+              if (q.includes("is:pr")) {
+                return { data: { total_count: 0, items: [] } };
+              }
+              return { data: { total_count: 0, items: [] } };
+            }),
+          },
+          issues: {
+            create: createIssueMock,
+            createComment: vi.fn(),
+            getLabel: vi.fn(),
+            addLabels: vi.fn(),
+          },
+          pulls: { get: vi.fn() },
+        },
+        graphql: vi.fn(),
+      };
+
+      return { createIssueMock };
+    };
+
+    beforeEach(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "aw-failure-filter-"));
+      promptsDir = path.join(tmpDir, "gh-aw", "prompts");
+      fs.mkdirSync(promptsDir, { recursive: true });
+      fs.writeFileSync(path.join(promptsDir, "agent_failure_comment.md"), "COMMENT TEMPLATE CONTENT");
+      fs.writeFileSync(path.join(promptsDir, "agent_failure_issue.md"), "ISSUE TEMPLATE CONTENT");
+      fs.writeFileSync(path.join(promptsDir, "daily_cap_rollup_issue.md"), "Daily cap rollup issue body cap={cap} window={window_hours}");
+      fs.writeFileSync(path.join(promptsDir, "daily_cap_rollup_comment.md"), "Failure suppressed workflow={workflow_name} run={run_url} categories={summary} cap={cap} window={window_hours}h");
+      fs.writeFileSync(path.join(promptsDir, "optimize_token_consumption_context.md"), "OPTIMIZE CONTEXT guardrail={guardrail_name} run={run_url}");
+
+      process.env.RUNNER_TEMP = tmpDir;
+      process.env.GH_AW_WORKFLOW_NAME = "Test Workflow";
+      process.env.GH_AW_WORKFLOW_ID = "test-workflow";
+      process.env.GH_AW_RUN_URL = "https://github.com/owner/repo/actions/runs/123456";
+      process.env.GH_AW_AGENT_CONCLUSION = "failure";
+      process.env.GITHUB_HEAD_REF = "feature/test";
+      process.env.GITHUB_WORKSPACE = tmpDir;
+    });
+
+    afterEach(() => {
+      delete process.env.RUNNER_TEMP;
+      delete process.env.GH_AW_WORKFLOW_NAME;
+      delete process.env.GH_AW_WORKFLOW_ID;
+      delete process.env.GH_AW_RUN_URL;
+      delete process.env.GH_AW_AGENT_CONCLUSION;
+      delete process.env.GITHUB_HEAD_REF;
+      delete process.env.GITHUB_WORKSPACE;
+      delete process.env.GH_AW_FAILURE_CATEGORIES_FILTER;
+      delete process.env.GH_AW_FAILURE_EXCLUDED_CATEGORIES_FILTER;
+
+      if (tmpDir && fs.existsSync(tmpDir)) {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it.each([
+      {
+        name: "include-only filter creates issue when category matches",
+        includeFilter: ["agent_failure"],
+        excludeFilter: null,
+        shouldCreateIssue: true,
+      },
+      {
+        name: "include-only filter skips issue when category does not match",
+        includeFilter: ["missing_safe_outputs"],
+        excludeFilter: null,
+        shouldCreateIssue: false,
+      },
+      {
+        name: "exclude-only filter skips issue when category is excluded",
+        includeFilter: null,
+        excludeFilter: ["agent_failure"],
+        shouldCreateIssue: false,
+      },
+      {
+        name: "mixed include+exclude filter skips issue when excluded category is present",
+        includeFilter: ["agent_failure"],
+        excludeFilter: ["agent_failure"],
+        shouldCreateIssue: false,
+      },
+    ])("$name", async ({ includeFilter, excludeFilter, shouldCreateIssue }) => {
+      const { createIssueMock } = setupGithubMock();
+      if (includeFilter) {
+        process.env.GH_AW_FAILURE_CATEGORIES_FILTER = JSON.stringify(includeFilter);
+      }
+      if (excludeFilter) {
+        process.env.GH_AW_FAILURE_EXCLUDED_CATEGORIES_FILTER = JSON.stringify(excludeFilter);
+      }
+
+      await main();
+
+      if (shouldCreateIssue) {
+        expect(createIssueMock).toHaveBeenCalledOnce();
+      } else {
+        expect(createIssueMock).not.toHaveBeenCalled();
+      }
     });
   });
 });

@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "🔬"
 name: Copilot PR Conversation NLP Analysis
 description: Performs natural language processing analysis on Copilot PR conversations to extract insights and patterns from user interactions
@@ -70,7 +71,8 @@ timeout-minutes: 20
 
 tools:
   cli-proxy: true
-
+features:
+  gh-aw-detection: true
 ---
 
 # Copilot PR Conversation NLP Analysis

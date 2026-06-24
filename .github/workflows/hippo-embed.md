@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "🦛"
 name: Hippo Embed
 description: Maintenance workflow to audit low-quality entries and embed all Hippo memories to restore semantic recall quality
@@ -11,7 +12,8 @@ permissions:
   copilot-requests: write
 tracker-id: hippo-embed
 engine:
-  id: copilot
+  id: pi
+  model: copilot/gpt-5.4
   bare: true
 
 timeout-minutes: 60
@@ -32,6 +34,8 @@ sandbox:
 
 tools:
   cli-proxy: true
+  github:
+    mode: gh-proxy
   bash:
     - "*"
 

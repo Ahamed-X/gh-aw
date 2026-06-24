@@ -115,6 +115,14 @@ func getAgentConfig(workflowData *WorkflowData) *AgentSandboxConfig {
 	return workflowData.SandboxConfig.Agent
 }
 
+func isAWFNetworkIsolationEnabled(workflowData *WorkflowData) bool {
+	agentConfig := getAgentConfig(workflowData)
+	if agentConfig == nil || agentConfig.Disabled {
+		return false
+	}
+	return agentConfig.NetworkIsolation
+}
+
 // enableFirewallByDefaultForCopilot enables firewall by default for copilot and codex engines
 // when network restrictions are present but no explicit firewall configuration exists
 // and no SRT sandbox is configured (SRT and AWF are mutually exclusive)
@@ -143,6 +151,22 @@ func enableFirewallByDefaultForCopilot(engineID string, networkPermissions *Netw
 func enableFirewallByDefaultForClaude(engineID string, networkPermissions *NetworkPermissions, sandboxConfig *SandboxConfig) {
 	// Only apply to claude engine
 	if engineID != string(constants.ClaudeEngine) {
+		return
+	}
+
+	enableFirewallByDefaultForEngine(engineID, networkPermissions, sandboxConfig)
+}
+
+// enableFirewallByDefaultForPi enables firewall by default for Pi engine
+// when network restrictions are present but no explicit firewall configuration exists
+// and sandbox.agent is not explicitly set to false
+//
+// The firewall is enabled by default for Pi UNLESS:
+// - allowed contains "*" (unrestricted network access)
+// - sandbox.agent is explicitly set to false
+func enableFirewallByDefaultForPi(engineID string, networkPermissions *NetworkPermissions, sandboxConfig *SandboxConfig) {
+	// Only apply to pi engine
+	if engineID != string(constants.PiEngine) {
 		return
 	}
 

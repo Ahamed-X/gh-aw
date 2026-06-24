@@ -1118,8 +1118,9 @@ jobs:
 
       # Enforce selected production custom analyzers without blocking on unrelated
       # legacy custom analyzer findings in tests or other analyzer families.
+      # Note: -test=false intentionally scopes this gate to production code only.
     - name: Run custom linters
-      run: make golint-custom LINTER_FLAGS="-errstringmatch -panicinlibrarycode -manualmutexunlock -osexitinlibrary -rawloginlib -regexpcompileinfunction -fprintlnsprintf -strconvparseignorederror -jsonmarshalignoredeerror -uncheckedtypeassertion -fmterrorfnoverbs -tolowerequalfold -httpnoctx -test=false"
+      run: make golint-custom LINTER_FLAGS="-errstringmatch -panicinlibrarycode -manualmutexunlock -osexitinlibrary -rawloginlib -regexpcompileinfunction -fprintlnsprintf -strconvparseignorederror -jsonmarshalignoredeerror -uncheckedtypeassertion -fmterrorfnoverbs -tolowerequalfold -httpnoctx -timeafterleak -test=false"
 
       # Ensure no action shell scripts invoke python or python3
     - name: Lint action shell scripts
@@ -1844,14 +1845,91 @@ jobs:
         # ScanType 3 = custom scan. Use -File to scan only the copied binary.
         # Capture output (2>&1 merges stderr into the output stream so all
         # MpCmdRun messages are available for strict failure checks below.
-        $output = & $mpCmdRun -Scan -ScanType 3 -File $binaryPath -DisableRemediation 2>&1 | ForEach-Object { "$_" }
-        $scanExitCode = $LASTEXITCODE
-        $outputText = @($output) -join "`n"
+        # Retry on transient service errors (e.g. WinDefend in StopPending state,
+        # hr = 0x800106ba) which can occur transiently on Windows runners.
+        $scanAttempts = 3
+        $scanDelaySeconds = 15
+        $output = $null
+        $scanExitCode = 0
+        $outputText = ""
+        for ($scanAttempt = 1; $scanAttempt -le $scanAttempts; $scanAttempt++) {
+          if ($scanAttempt -gt 1) {
+            Write-Host "Retrying Microsoft Defender scan (attempt $scanAttempt/$scanAttempts)..."
+          }
+          $output = & $mpCmdRun -Scan -ScanType 3 -File $binaryPath -DisableRemediation 2>&1 | ForEach-Object { "$_" }
+          $scanExitCode = $LASTEXITCODE
+          $outputText = @($output) -join "`n"
+          $isTransientError = $scanExitCode -ne 0 -and $outputText -imatch "0x800106ba"
+          if (-not $isTransientError -or $scanAttempt -eq $scanAttempts) {
+            break
+          }
+          Write-Warning "Defender scan failed with a transient service error (attempt $scanAttempt/$scanAttempts). Retrying in $scanDelaySeconds seconds..."
+          Start-Sleep -Seconds $scanDelaySeconds
+        }
 
         Write-Host "=== MpCmdRun output ==="
         $output | ForEach-Object { Write-Host $_ }
         Write-Host "Exit code: $scanExitCode"
         Write-Host "======================="
+
+        # Write diagnostic info and scan output to a log file for artifact upload.
+        $logFile = Join-Path $env:RUNNER_TEMP "defender-scan-log.txt"
+        $mpStatusLines = if ($mpStatus) {
+          @(
+            "AntivirusEnabled: $($mpStatus.AntivirusEnabled)",
+            "RealTimeProtectionEnabled: $($mpStatus.RealTimeProtectionEnabled)",
+            "AntivirusSignatureVersion: $($mpStatus.AntivirusSignatureVersion)",
+            "AntivirusSignatureLastUpdated: $($mpStatus.AntivirusSignatureLastUpdated)",
+            "AMProductVersion: $($mpStatus.AMProductVersion)",
+            "AMEngineVersion: $($mpStatus.AMEngineVersion)",
+            "AMRunningMode: $($mpStatus.AMRunningMode)",
+            "IoavProtectionEnabled: $($mpStatus.IoavProtectionEnabled)"
+          )
+        } else {
+          @("(Get-MpComputerStatus unavailable)")
+        }
+        $mpPrefLines = if ($mpPreference) {
+          @(
+            "ExclusionPath: $(@($mpPreference.ExclusionPath) -join '; ')",
+            "ExclusionExtension: $(@($mpPreference.ExclusionExtension) -join '; ')",
+            "ExclusionProcess: $(@($mpPreference.ExclusionProcess) -join '; ')",
+            "ExclusionIpAddress: $(@($mpPreference.ExclusionIpAddress) -join '; ')"
+          )
+        } else {
+          @("(Get-MpPreference unavailable)")
+        }
+        $winDefendLines = if ($winDefendService) {
+          @(
+            "WinDefend service status: $($winDefendService.Status)",
+            "WinDefend service start: $($winDefendService.StartType)"
+          )
+        } else {
+          @("(WinDefend service unavailable)")
+        }
+        $logContent = @(
+          "=== Microsoft Defender diagnostic info ===",
+          ($mpStatusLines -join "`n"),
+          ($mpPrefLines -join "`n"),
+          ($winDefendLines -join "`n"),
+          "MpCmdRun.exe path: $mpCmdRun",
+          "Workspace binary: $workspaceBinaryPath",
+          "Workspace size: $($stableBinaryItem.Length) bytes",
+          "Workspace SHA256: $workspaceBinaryHash",
+          "Binary to scan: $binaryPath",
+          "Binary size: $($scanBinaryItem.Length) bytes",
+          "Binary SHA256: $scanBinaryHash",
+          "==========================================",
+          "",
+          "=== MpCmdRun output ===",
+          $outputText,
+          "Exit code: $scanExitCode",
+          "======================="
+        ) -join "`n"
+        try {
+          Set-Content -Path $logFile -Value $logContent -Encoding UTF8
+        } catch {
+          Write-Host "Warning: could not write defender scan log file: $_"
+        }
 
         # Exit code alone is not enough: explicitly parse output to confirm scan execution.
         $skipped = $output | Where-Object { $_ -imatch "\bwas skipped\b|\bcannot be scanned\b|\bnot performed\b|\b(?:file|scan).*\bexcluded\b" }
@@ -1880,6 +1958,14 @@ jobs:
         }
 
         Write-Host "✅ Microsoft Defender scan completed successfully for $binaryPath"
+
+    - name: Upload Defender scan logs
+      if: always() && runner.os == 'Windows'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02   # v4
+      with:
+        name: defender-scan-log-${{ github.run_id }}-${{ github.run_attempt }}
+        path: ${{ runner.temp }}/defender-scan-log.txt
+        retention-days: 7
 
     - name: Create test workflow
       shell: bash

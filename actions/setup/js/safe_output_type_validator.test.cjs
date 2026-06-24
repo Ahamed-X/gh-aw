@@ -36,13 +36,30 @@ const SAMPLE_VALIDATION_CONFIG = {
       labels: { type: "array", itemType: "string", itemSanitize: true, itemMaxLength: 128 },
     },
   },
+  add_labels: {
+    defaultMax: 3,
+    fields: {
+      labels: { required: true, type: "array" },
+      item_number: { issueNumberOrTemporaryId: true },
+    },
+  },
+  remove_labels: {
+    defaultMax: 3,
+    fields: {
+      labels: { required: true, type: "array" },
+      item_number: { issueNumberOrTemporaryId: true },
+    },
+  },
   update_issue: {
     defaultMax: 1,
-    customValidation: "requiresOneOf:status,title,body",
+    customValidation: "requiresOneOf:status,title,body,labels,assignees,milestone",
     fields: {
       status: { type: "string", enum: ["open", "closed"] },
       title: { type: "string", sanitize: true, maxLength: 128 },
       body: { type: "string", sanitize: true, maxLength: 65000 },
+      labels: { type: "array" },
+      assignees: { type: "array", itemType: "string", itemSanitize: true, itemMaxLength: 39 },
+      milestone: { optionalPositiveInteger: true },
       issue_number: { issueOrPRNumber: true },
     },
   },
@@ -90,8 +107,31 @@ const SAMPLE_VALIDATION_CONFIG = {
     fields: {
       body: { type: "string", sanitize: true, maxLength: 65000 },
       event: { type: "string", enum: ["APPROVE", "REQUEST_CHANGES", "COMMENT"] },
-      pull_request_number: { optionalPositiveInteger: true },
+      pull_request_number: { issueOrPRNumber: true },
       repo: { type: "string", maxLength: 256 },
+    },
+  },
+  set_issue_type: {
+    defaultMax: 5,
+    fields: {
+      issue_number: { issueOrPRNumber: true },
+      issue_type: { required: true, type: "string", sanitize: true, maxLength: 128 },
+      rationale: { type: "string", sanitize: true, maxLength: 1024 },
+      confidence: { type: "string", enum: ["LOW", "MEDIUM", "HIGH"] },
+      suggest: { type: "boolean" },
+    },
+  },
+  set_issue_field: {
+    defaultMax: 5,
+    customValidation: "requiresOneOf:field_name,field_node_id",
+    fields: {
+      issue_number: { issueOrPRNumber: true },
+      field_name: { type: "string", sanitize: true, maxLength: 128 },
+      field_node_id: { type: "string", maxLength: 256 },
+      value: { required: true, type: "string", sanitize: true, maxLength: 256 },
+      rationale: { type: "string", sanitize: true, maxLength: 1024 },
+      confidence: { type: "string", enum: ["LOW", "MEDIUM", "HIGH"] },
+      suggest: { type: "boolean" },
     },
   },
   link_sub_issue: {
@@ -139,6 +179,41 @@ const SAMPLE_VALIDATION_CONFIG = {
         sanitize: true,
         maxLength: 128,
       },
+    },
+  },
+  update_release: {
+    defaultMax: 1,
+    fields: {
+      tag: { type: "string", sanitize: true, maxLength: 256 },
+      operation: { required: true, type: "string", enum: ["replace", "append", "prepend"] },
+      body: { required: true, type: "string", sanitize: true, maxLength: 65000, minLength: 20 },
+    },
+  },
+  dispatch_workflow: {
+    defaultMax: 1,
+    fields: {
+      workflow_name: {
+        required: true,
+        type: "string",
+        sanitize: true,
+        minLength: 1,
+        maxLength: 256,
+        pattern: ".*\\S.*",
+        patternError: "must not be empty",
+      },
+      inputs: { type: "object" },
+    },
+  },
+  hide_comment: {
+    defaultMax: 5,
+    fields: {
+      comment_id: {
+        required: true,
+        type: "string",
+        maxLength: 256,
+        typeHint: "GraphQL node ID string (e.g. 'IC_kwDOABCD123456'); numeric REST comment IDs are accepted but may not resolve for all comment types (e.g. PR review comments)",
+      },
+      reason: { type: "string" },
     },
   },
 };
@@ -202,6 +277,23 @@ describe("safe_output_type_validator", () => {
       expect(result.normalizedItem).toBeDefined();
     });
 
+    it("should validate dispatch_workflow with non-empty workflow_name", async () => {
+      const { validateItem } = await import("./safe_output_type_validator.cjs");
+
+      const result = validateItem({ type: "dispatch_workflow", workflow_name: "haiku-printer", inputs: {} }, "dispatch_workflow", 1);
+
+      expect(result.isValid).toBe(true);
+    });
+
+    it("should fail dispatch_workflow when workflow_name is whitespace-only", async () => {
+      const { validateItem } = await import("./safe_output_type_validator.cjs");
+
+      const result = validateItem({ type: "dispatch_workflow", workflow_name: "   ", inputs: {} }, "dispatch_workflow", 1);
+
+      expect(result.isValid).toBe(false);
+      expect(result.error).toContain("workflow_name");
+    });
+
     it("should fail validation when required title is missing", async () => {
       const { validateItem } = await import("./safe_output_type_validator.cjs");
 
@@ -218,6 +310,40 @@ describe("safe_output_type_validator", () => {
 
       expect(result.isValid).toBe(false);
       expect(result.error).toContain("body");
+    });
+
+    it("should validate add_labels with structured label entries", async () => {
+      const { validateItem } = await import("./safe_output_type_validator.cjs");
+
+      const result = validateItem(
+        {
+          type: "add_labels",
+          item_number: 123,
+          labels: [{ name: "bug", rationale: "Known failure mode", confidence: "high", suggest: true }],
+        },
+        "add_labels",
+        1
+      );
+
+      expect(result.isValid).toBe(true);
+      expect(result.normalizedItem.labels).toEqual([{ name: "bug", rationale: "Known failure mode", confidence: "HIGH", suggest: true }]);
+    });
+
+    it("should fail add_labels when structured label entry is invalid", async () => {
+      const { validateItem } = await import("./safe_output_type_validator.cjs");
+
+      const result = validateItem(
+        {
+          type: "add_labels",
+          item_number: 123,
+          labels: [{ rationale: "missing name" }],
+        },
+        "add_labels",
+        1
+      );
+
+      expect(result.isValid).toBe(false);
+      expect(result.error).toContain("name");
     });
 
     it("should sanitize string fields", async () => {
@@ -380,7 +506,7 @@ describe("safe_output_type_validator", () => {
       const result = validateItem({ type: "submit_pull_request_review", event: "APPROVE", pull_request_number: "42", repo: "owner/repo" }, "submit_pull_request_review", 1);
 
       expect(result.isValid).toBe(true);
-      expect(result.normalizedItem.pull_request_number).toBe(42);
+      expect(result.normalizedItem.pull_request_number).toBe("42"); // IssueOrPRNumber does not normalize strings to integers
       expect(result.normalizedItem.repo).toBe("owner/repo");
     });
 
@@ -415,12 +541,39 @@ describe("safe_output_type_validator", () => {
     it("should reject invalid submit_pull_request_review pull_request_number", async () => {
       const { validateItem } = await import("./safe_output_type_validator.cjs");
 
-      const invalidValues = [0, -1, "abc", 3.14];
+      // IssueOrPRNumber accepts any string or number - only reject invalid types
+      const invalidValues = [{ foo: "bar" }, ["array"], true];
       for (const value of invalidValues) {
         const result = validateItem({ type: "submit_pull_request_review", event: "APPROVE", pull_request_number: value }, "submit_pull_request_review", 1);
         expect(result.isValid).toBe(false);
         expect(result.error).toContain("pull_request_number");
       }
+    });
+
+    it("should include typeHint in error when hide_comment comment_id is missing", async () => {
+      const { validateItem } = await import("./safe_output_type_validator.cjs");
+
+      const result = validateItem({ type: "hide_comment" }, "hide_comment", 1);
+
+      expect(result.isValid).toBe(false);
+      expect(result.error).toContain("GraphQL node ID");
+    });
+
+    it("should include typeHint in error when hide_comment comment_id is a numeric REST id", async () => {
+      const { validateItem } = await import("./safe_output_type_validator.cjs");
+
+      const result = validateItem({ type: "hide_comment", comment_id: 4748731349 }, "hide_comment", 1);
+
+      expect(result.isValid).toBe(false);
+      expect(result.error).toContain("GraphQL node ID");
+    });
+
+    it("should accept hide_comment with a GraphQL node ID comment_id", async () => {
+      const { validateItem } = await import("./safe_output_type_validator.cjs");
+
+      const result = validateItem({ type: "hide_comment", comment_id: "IC_kwDOABCD123456" }, "hide_comment", 1);
+
+      expect(result.isValid).toBe(true);
     });
   });
 
@@ -612,6 +765,14 @@ describe("safe_output_type_validator", () => {
       expect(result.isValid).toBe(true);
     });
 
+    it("should pass when update_issue only includes labels", async () => {
+      const { validateItem } = await import("./safe_output_type_validator.cjs");
+
+      const result = validateItem({ type: "update_issue", labels: [{ name: "bug", confidence: "HIGH" }] }, "update_issue", 1);
+
+      expect(result.isValid).toBe(true);
+    });
+
     it("should fail when none of the required fields are present", async () => {
       const { validateItem } = await import("./safe_output_type_validator.cjs");
 
@@ -743,6 +904,18 @@ describe("safe_output_type_validator", () => {
       expect(result.isValid).toBe(false);
       expect(result.error).toContain("must be 'open' or 'closed'");
     });
+
+    it("should validate issue intent confidence enums", async () => {
+      const { validateItem } = await import("./safe_output_type_validator.cjs");
+
+      const typeResult = validateItem({ type: "set_issue_type", issue_type: "Bug", confidence: "high", suggest: true }, "set_issue_type", 1);
+      expect(typeResult.isValid).toBe(true);
+      expect(typeResult.normalizedItem.confidence).toBe("HIGH");
+
+      const fieldResult = validateItem({ type: "set_issue_field", field_name: "Priority", value: "P1", confidence: "medium", rationale: "Customer escalation" }, "set_issue_field", 1);
+      expect(fieldResult.isValid).toBe(true);
+      expect(fieldResult.normalizedItem.confidence).toBe("MEDIUM");
+    });
   });
 
   describe("pattern validation", () => {
@@ -857,6 +1030,33 @@ describe("safe_output_type_validator", () => {
       const { validateItem } = await import("./safe_output_type_validator.cjs");
 
       const result = validateItem({ type: "create_discussion", title: "Test Discussion", body: "   short   " }, "create_discussion", 1);
+
+      expect(result.isValid).toBe(false);
+      expect(result.error).toContain("too short");
+    });
+
+    it("should reject update_release body shorter than minLength (e.g. 'test')", async () => {
+      const { validateItem } = await import("./safe_output_type_validator.cjs");
+
+      const result = validateItem({ type: "update_release", tag: "v1.0.0", operation: "prepend", body: "test" }, "update_release", 1);
+
+      expect(result.isValid).toBe(false);
+      expect(result.error).toContain("too short");
+      expect(result.error).toContain("20");
+    });
+
+    it("should accept update_release body that meets minLength", async () => {
+      const { validateItem } = await import("./safe_output_type_validator.cjs");
+
+      const result = validateItem({ type: "update_release", tag: "v1.0.0", operation: "prepend", body: "Patch release with bug fixes and improvements." }, "update_release", 1);
+
+      expect(result.isValid).toBe(true);
+    });
+
+    it("should reject update_release body that is only whitespace below minLength", async () => {
+      const { validateItem } = await import("./safe_output_type_validator.cjs");
+
+      const result = validateItem({ type: "update_release", tag: "v1.0.0", operation: "prepend", body: "   test   " }, "update_release", 1);
 
       expect(result.isValid).toBe(false);
       expect(result.error).toContain("too short");

@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "🧪"
 description: Daily test of GitHub remote MCP authentication with GitHub Actions token
 on:
@@ -27,6 +28,8 @@ imports:
 
 
   - shared/otlp.md
+features:
+  gh-aw-detection: true
 ---
 # GitHub Remote MCP Authentication Test
 

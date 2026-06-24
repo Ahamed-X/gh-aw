@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "🏗️"
 description: Generates a weekly high-level ASCII architecture diagram of the repository, using cache-memory to focus only on what changed since the last run.
 on:
@@ -62,6 +63,8 @@ imports:
   - shared/otlp.md
 timeout-minutes: 20
 strict: true
+features:
+  gh-aw-detection: true
 ---
 
 # Architecture Diagram Generator

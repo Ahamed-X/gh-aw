@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "🔬"
 description: Smoke Copilot SDK
 on:
@@ -31,6 +32,8 @@ safe-outputs:
     close-older-key: "smoke-copilot-sdk"
     labels: [automation, testing]
 timeout-minutes: 10
+features:
+  gh-aw-detection: true
 ---
 
 # Smoke Test: Copilot SDK Engine Validation

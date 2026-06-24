@@ -182,6 +182,8 @@ constants.AgentArtifactName           // "agent" (unified agent artifact)
 constants.DetectionArtifactName       // "detection"
 constants.LegacyDetectionArtifactName // "threat-detection.log" (backward compat)
 constants.ActivationArtifactName      // "activation"
+constants.ExperimentArtifactName      // "experiment" — A/B experiment state uploaded by the activation job
+constants.UsageArtifactName           // "usage" — compact run metadata and token-usage files from the conclusion job
 constants.SafeOutputItemsArtifactName // "safe-outputs-items"
 constants.SarifArtifactName           // "code-scanning-sarif"
 
@@ -191,6 +193,7 @@ constants.SafeOutputsFilename         // "safeoutputs.jsonl"
 constants.TokenUsageFilename          // "agent_usage.json"
 constants.GithubRateLimitsFilename    // "github_rate_limits.jsonl"
 constants.OtelJsonlFilename           // "otel.jsonl"
+constants.OtlpExportErrorsFilename    // "otlp-export-errors.jsonl" — OTLP per-endpoint export failure log
 constants.TemporaryIdMapFilename      // "temporary-id-map.json"
 constants.SarifFileName               // "code-scanning-alert.sarif"
 constants.SarifArtifactDownloadPath   // "/tmp/gh-aw/sarif/"
@@ -219,6 +222,7 @@ constants.PreActivationAppTokenStepID    // "pre-activation-app-token"
 
 // Agent job step IDs
 constants.ParseMCPGatewayStepID          // "parse-mcp-gateway"
+constants.DetectAgentErrorsStepID        // "detect-agent-errors" — post-execution error detection step
 ```
 
 ### Step Output Keys
@@ -252,10 +256,12 @@ constants.AgenticWorkflowsMCPServerID  // "agenticworkflows"
 
 ```go
 // AI engine CLIs
-constants.DefaultCopilotVersion         // Copilot CLI version (e.g. "1.0.60")
+constants.DefaultCopilotVersion         // Copilot CLI version (e.g. "1.0.63")
+constants.DefaultCopilotSDKVersion      // @github/copilot-sdk npm package version
 constants.DefaultClaudeCodeVersion      // Claude Code CLI version
 constants.DefaultCodexVersion           // OpenAI Codex CLI version
 constants.DefaultGeminiVersion          // Google Gemini CLI version
+constants.DefaultAntigravityVersion     // Antigravity CLI version
 constants.DefaultCrushVersion           // Crush CLI version
 constants.DefaultOpenCodeVersion        // OpenCode CLI version
 constants.DefaultPiVersion              // Pi CLI version (experimental)
@@ -263,10 +269,12 @@ constants.DefaultPiVersion              // Pi CLI version (experimental)
 // Infrastructure
 constants.DefaultGitHubMCPServerVersion // GitHub MCP server Docker image version
 constants.DefaultFirewallVersion        // AWF firewall version
+constants.DefaultThreatDetectVersion    // gh-aw-threat-detection binary version
 constants.DefaultMCPGatewayVersion      // MCP Gateway (gh-aw-mcpg) Docker image version
 
 // MCP tooling
 constants.DefaultPlaywrightMCPVersion   // @playwright/mcp npm package version
+constants.DefaultPlaywrightCLIVersion   // @playwright/cli npm package version (tools.playwright.mode = "cli")
 constants.DefaultPlaywrightBrowserVersion // Playwright browser Docker image version
 constants.DefaultMCPSDKVersion          // @modelcontextprotocol/sdk npm package version
 constants.DefaultGitHubScriptVersion    // actions/github-script action version
@@ -294,6 +302,7 @@ constants.AWFCliProxyMinVersion         // "v0.25.17" — minimum AWF for CLI pr
 constants.AWFAllowHostPortsMinVersion   // "v0.25.24" — minimum AWF for --allow-host-ports
 constants.AWFDockerHostPathPrefixMinVersion // "v0.25.43" — minimum AWF for --docker-host-path-prefix
 constants.AWFTokenSteeringMinVersion    // "v0.25.44" — minimum AWF for token steering support
+constants.AWFChrootConfigMinVersion     // "v0.27.1"  — minimum AWF for chroot.binariesSourcePath and identity.*
 constants.CopilotNoAskUserMinVersion    // "1.0.19"   — minimum Copilot CLI for --no-ask-user
 constants.MCPGIntegrityReactionsMinVersion // "v0.2.18" — minimum MCPG for integrity-reactions policy
 ```
@@ -392,6 +401,14 @@ constants.AWFAuditDir                // "/tmp/gh-aw/sandbox/firewall/audit"
 constants.AWFDefaultLogLevel         // "info"
 constants.DefaultGitHubLockdown      // false — GitHub MCP server lockdown default
 constants.AWFAPIProxyContainerIP     // "172.30.0.30" — fixed api-proxy sidecar address inside the AWF sandbox network
+```
+
+### Threat Detection Paths
+
+```go
+constants.ThreatDetectionLogPath    // "/tmp/gh-aw/threat-detection/detection.log" — engine log file
+constants.ThreatDetectionDir        // "/tmp/gh-aw/threat-detection" — working directory
+constants.ThreatDetectionResultPath // "/tmp/gh-aw/threat-detection/detection_result.json" — structured verdict output
 ```
 
 ## Validation Field Lists

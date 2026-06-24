@@ -8,6 +8,7 @@ import (
 
 	"github.com/github/gh-aw/pkg/constants"
 	"github.com/github/gh-aw/pkg/logger"
+	"github.com/github/gh-aw/pkg/setutil"
 	"github.com/github/gh-aw/pkg/stringutil"
 )
 
@@ -118,20 +119,15 @@ func (c *Compiler) buildSafeOutputsSetupAndDownloadSteps(data *WorkflowData, age
 		consolidatedSafeOutputsJobLog.Print("Adding patch artifact download for create-pull-request or push-to-pull-request-branch")
 		patchDownloadSteps := buildArtifactDownloadSteps(ArtifactDownloadConfig{
 			ArtifactName: agentArtifactPrefix + constants.AgentArtifactName,
-			DownloadPath: "/tmp/gh-aw/",
+			DownloadPath: constants.TmpGhAwDirSlash,
 			SetupEnvStep: false, // No environment variable needed, the script checks the file directly
 			StepName:     "Download patch artifact",
 		}, c.getActionPin)
 		steps = append(steps, patchDownloadSteps...)
 
-		// Extract the base branch from the agent output so the checkout step can use it
-		// directly instead of relying on event-context expressions. This is the key
-		// decoupling that allows correct checkout for issue_comment events on PRs
-		// targeting non-default branches.
-		consolidatedSafeOutputsJobLog.Print("Adding base branch extraction step")
-		steps = append(steps, buildExtractBaseBranchStep()...)
-
-		// Add checkout and git config steps for PR operations
+		// Add checkout and git config steps for PR operations. These mirror the agent job's
+		// checkout layout exactly (same CheckoutManager generators); the base branch is
+		// resolved by the JS handler at apply time, so no checkout-time base ref is needed.
 		consolidatedSafeOutputsJobLog.Print("Adding shared checkout step for PR operations")
 		checkoutSteps := c.buildSharedPRCheckoutSteps(data)
 		steps = append(steps, checkoutSteps...)
@@ -157,7 +153,10 @@ func (c *Compiler) buildSafeOutputsSetupAndDownloadSteps(data *WorkflowData, age
 			if err != nil {
 				return nil, fmt.Errorf("failed to convert safe-outputs step at index %d to typed step: %w", i, err)
 			}
-			pinnedStep := applyActionPinToTypedStep(typedStep, data)
+			pinnedStep, err := applyActionPinToTypedStep(typedStep, data)
+			if err != nil {
+				return nil, fmt.Errorf("failed to pin action for safe-outputs step at index %d: %w", i, err)
+			}
 			stepYAML, err := ConvertStepToYAML(pinnedStep.ToMap())
 			if err != nil {
 				return nil, fmt.Errorf("failed to convert safe-outputs step at index %d to YAML: %w", i, err)
@@ -478,7 +477,7 @@ func (c *Compiler) buildSafeOutputsJobFromParts(
 		if usesPatchesAndCheckouts(data.SafeOutputs) {
 			patchDownloadSteps := buildArtifactDownloadSteps(ArtifactDownloadConfig{
 				ArtifactName: agentArtifactPrefix + constants.AgentArtifactName,
-				DownloadPath: "/tmp/gh-aw/",
+				DownloadPath: constants.TmpGhAwDirSlash,
 				SetupEnvStep: false,
 				StepName:     "Download patch artifact",
 			}, c.getActionPin)
@@ -581,17 +580,20 @@ func (c *Compiler) buildSafeOutputsJobFromParts(
 		needs = append(needs, "unlock")
 		consolidatedSafeOutputsJobLog.Print("Added unlock job dependency to safe_outputs job")
 	}
-	seenNeeds := make(map[string]bool, len(needs))
+	seenNeeds := make(map[string]struct {
+	}, len(needs))
 	for _, need := range needs {
-		seenNeeds[need] = true
+		seenNeeds[need] = struct {
+		}{}
 	}
 	if data.SafeOutputs != nil {
 		for _, need := range data.SafeOutputs.Needs {
-			if seenNeeds[need] {
+			if setutil.Contains(seenNeeds, need) {
 				continue
 			}
 			needs = append(needs, need)
-			seenNeeds[need] = true
+			seenNeeds[need] = struct {
+			}{}
 			consolidatedSafeOutputsJobLog.Printf("Added explicit safe-outputs needs dependency to safe_outputs job: %s", need)
 		}
 	}

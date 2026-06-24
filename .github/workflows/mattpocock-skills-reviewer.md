@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "🔍"
 description: Reviews pull requests using Matt Pocock's engineering skills to provide targeted, high-quality improvement suggestions based on the type of changes
 on:
@@ -75,6 +76,8 @@ pre-agent-steps:
       echo "Pre-fetched PR diff (${LINES} lines) and metadata"
 tools:
   cli-proxy: true
+  github:
+    mode: gh-proxy
 safe-outputs:
   add-comment:
     hide-older-comments: true

@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "🧪"
 description: Daily exploratory testing of audit, logs, and compile tools in gh-aw CLI
 on:
@@ -32,6 +33,8 @@ imports:
       expires: 3d
 
   - shared/otlp.md
+features:
+  gh-aw-detection: true
 ---
 
 # Daily CLI Tools Exploratory Tester

@@ -9,6 +9,7 @@ import (
 
 	"github.com/github/gh-aw/pkg/constants"
 	"github.com/github/gh-aw/pkg/logger"
+	"github.com/github/gh-aw/pkg/setutil"
 )
 
 var agenticEngineLog = logger.New("workflow:agentic_engine")
@@ -221,6 +222,16 @@ type ModelEnvVarProvider interface {
 	GetModelEnvVarName() string
 }
 
+// LLMProviderResolver is implemented by engines that support selecting
+// different inference providers at runtime (for example engine.model-provider).
+// This interface is intentionally separate from CodingAgentEngine so provider
+// concerns remain decoupled from core engine execution capabilities.
+type LLMProviderResolver interface {
+	// ResolveLLMProvider returns the effective provider for the workflow
+	// (for example "github", "anthropic", or "openai").
+	ResolveLLMProvider(workflowData *WorkflowData) string
+}
+
 // AgentFileProvider is an optional interface implemented by engines that have
 // engine-specific instruction or configuration files that should be treated as
 // security-sensitive manifests.  The compiler uses these lists to extend the
@@ -345,7 +356,7 @@ func (e *BaseEngine) GetModelEnvVarName() string {
 // Engines can override this to use engine-specific log files
 func (e *BaseEngine) GetLogFileForParsing() string {
 	// Default to agent-stdio.log which contains stdout/stderr
-	return "/tmp/gh-aw/agent-stdio.log"
+	return constants.AgentStdioLogPath
 }
 
 // GetRequiredSecretNames returns an empty list by default
@@ -552,7 +563,8 @@ func (r *EngineRegistry) GetAllAgentManifestFolders() []string {
 // computeAllAgentManifestFolders computes the manifest folders list from the registered engines.
 // Called once during NewEngineRegistry to populate cachedManifestFolders.
 func (r *EngineRegistry) computeAllAgentManifestFolders() []string {
-	seen := map[string]bool{}
+	seen := map[string]struct {
+	}{}
 	var result []string
 	for _, engine := range r.engines {
 		provider, ok := engine.(AgentFileProvider)
@@ -561,15 +573,16 @@ func (r *EngineRegistry) computeAllAgentManifestFolders() []string {
 		}
 		for _, prefix := range provider.GetAgentManifestPathPrefixes() {
 			folder := strings.TrimSuffix(prefix, "/")
-			if folder != "" && !seen[folder] {
-				seen[folder] = true
+			if folder != "" && !setutil.Contains(seen, folder) {
+				seen[folder] = struct {
+				}{}
 				result = append(result, folder)
 			}
 		}
 	}
 	// Always include .agents — the gh-aw platform agent directory.
 	// It is not owned by any specific engine but must always be snapshotted.
-	if !seen[".agents"] {
+	if !setutil.Contains(seen, ".agents") {
 		result = append(result, ".agents")
 	}
 	sort.Strings(result)
@@ -593,7 +606,8 @@ func (r *EngineRegistry) GetAllAgentManifestFiles() []string {
 // computeAllAgentManifestFiles computes the manifest files list from the registered engines.
 // Called once during NewEngineRegistry to populate cachedManifestFiles.
 func (r *EngineRegistry) computeAllAgentManifestFiles() []string {
-	seen := map[string]bool{}
+	seen := map[string]struct {
+	}{}
 	var result []string
 	for _, engine := range r.engines {
 		provider, ok := engine.(AgentFileProvider)
@@ -601,8 +615,9 @@ func (r *EngineRegistry) computeAllAgentManifestFiles() []string {
 			continue
 		}
 		for _, file := range provider.GetAgentManifestFiles() {
-			if !seen[file] {
-				seen[file] = true
+			if !setutil.Contains(seen, file) {
+				seen[file] = struct {
+				}{}
 				result = append(result, file)
 			}
 		}

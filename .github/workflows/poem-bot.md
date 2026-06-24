@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "🎭"
 description: Generates creative poems on specified themes when invoked with /poem-bot command
 # Custom triggers: command with events filter, workflow_dispatch
@@ -28,8 +29,8 @@ permissions:
 
 # AI engine configuration
 engine:
-  id: copilot
-  model: gpt-5
+  id: pi
+  model: copilot/gpt-5.4
   bare: true
 
 # Import shared reporting guidelines
@@ -151,8 +152,6 @@ safe-outputs:
 # Global timeout
 timeout-minutes: 10
 strict: true
-
-
 ---
 
 # Poem Bot - A Creative Agentic Workflow

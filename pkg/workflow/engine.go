@@ -13,6 +13,7 @@ import (
 	"github.com/github/gh-aw/pkg/stringutil"
 	"github.com/github/gh-aw/pkg/types"
 	"github.com/github/gh-aw/pkg/typeutil"
+	"github.com/github/gh-aw/pkg/workflow/compilerenv"
 )
 
 var engineLog = logger.New("workflow:engine")
@@ -25,29 +26,46 @@ func injectWorkflowCallNetworkAllowedEnv(env map[string]string, workflowData *Wo
 	}
 }
 
+func toEngineEnvValueString(value any) (string, bool) {
+	switch v := value.(type) {
+	case string:
+		return v, true
+	case float32:
+		return strconv.FormatFloat(float64(v), 'f', -1, 32), true
+	case float64:
+		return strconv.FormatFloat(v, 'f', -1, 64), true
+	case bool, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+		return fmt.Sprintf("%v", v), true
+	default:
+		return "", false
+	}
+}
+
 // EngineConfig represents the parsed engine configuration
 type EngineConfig struct {
-	ID               string
-	Version          string
-	Model            string
-	PermissionMode   string
-	MaxTurns         string
-	MaxToolDenials   string // Maximum repeated tool denials before stopping inference (copilot SDK mode only)
-	MaxRuns          int    // Maximum number of LLM invocations per run (AWF apiProxy.maxRuns)
-	MaxContinuations int    // Maximum number of continuations for autopilot mode (copilot engine only; > 1 enables --autopilot)
-	MaxAICredits     int64  // Maximum allowed AI credits per run for AWF apiProxy firewall enforcement
-	Concurrency      string // Agent job-level concurrency configuration (YAML format)
-	UserAgent        string
-	Command          string // Custom executable path (when set, skip installation steps)
-	HarnessScript    string // Custom Node.js harness script filename (replaces engine default harness script when supported)
-	CopilotSDKDriver string // Custom Copilot SDK driver script filename or command (copilot engine only). Setting this field implies copilot-sdk=true. Supports .js/.cjs/.mjs (Node.js), .py (Python), .ts/.mts (TypeScript), .rb (Ruby), or a bare command name for an arbitrary executable in PATH.
-	Env              map[string]string
-	Auth             *EngineAuthConfig // Engine-level auth config (mapped to AWF_AUTH_* env vars for API proxy sidecar auth)
-	Config           string
-	Args             []string
-	Agent            string // Agent identifier for copilot --agent flag (copilot engine only)
-	APITarget        string // Custom API endpoint hostname (e.g., "api.acme.ghe.com" or "api.enterprise.githubcopilot.com")
-	Bare             bool   // When true, disables automatic loading of context/instructions (copilot: --no-custom-instructions, claude: --bare, codex: --no-system-prompt, gemini: GEMINI_SYSTEM_MD=/dev/null)
+	ID                 string
+	Version            string
+	Model              string
+	LLMProvider        string // Inference provider override for this engine (github|anthropic|openai)
+	PermissionMode     string
+	MaxTurns           string
+	MaxToolDenials     string // Maximum repeated tool denials before stopping inference (copilot SDK mode only)
+	MaxRuns            int    // Maximum number of LLM invocations per run (AWF apiProxy.maxRuns)
+	MaxTurnCacheMisses int    // Maximum number of consecutive cache misses per run (AWF apiProxy.maxCacheMisses)
+	MaxContinuations   int    // Maximum number of continuations for autopilot mode (copilot engine only; > 1 enables --autopilot)
+	MaxAICredits       int64  // Maximum allowed AI credits per run for AWF apiProxy firewall enforcement
+	Concurrency        string // Agent job-level concurrency configuration (YAML format)
+	UserAgent          string
+	Command            string // Custom executable path (when set, skip installation steps)
+	HarnessScript      string // Custom Node.js harness script filename (replaces engine default harness script when supported)
+	Driver             string // Custom driver script filename or command. For the copilot engine (engine.copilot-sdk-driver / engine.driver), supports .js/.cjs/.mjs (Node.js), .py (Python), .ts/.mts (TypeScript), .rb (Ruby), or a bare command name. For the pi engine (engine.driver), supports .js/.cjs/.mjs or a bare basename resolved from the setup-action directory.
+	Env                map[string]string
+	Auth               *EngineAuthConfig // Engine-level auth config (mapped to AWF_AUTH_* env vars for API proxy sidecar auth)
+	Config             string
+	Args               []string
+	Agent              string // Agent identifier for copilot --agent flag (copilot engine only)
+	APITarget          string // Custom API endpoint hostname (e.g., "api.acme.ghe.com" or "api.enterprise.githubcopilot.com")
+	Bare               bool   // When true, disables automatic loading of context/instructions (copilot: --no-custom-instructions, claude: --bare, codex: --no-system-prompt, gemini: GEMINI_SYSTEM_MD=/dev/null)
 	// TokenWeights provides custom model cost data for AI Credits cost ratios.
 	// When set, overrides or extends built-in model cost defaults.
 	TokenWeights *types.TokenWeights
@@ -157,11 +175,21 @@ func (e *EngineConfig) GetMaxRuns() int {
 	return e.MaxRuns
 }
 
+// GetMaxTurnCacheMisses returns the configured AWF max-turn-cache-misses value, falling back
+// to the enterprise override or built-in default.
+func (e *EngineConfig) GetMaxTurnCacheMisses() int {
+	if e == nil || e.MaxTurnCacheMisses <= 0 {
+		return compilerenv.ResolveDefaultMaxTurnCacheMisses(constants.DefaultMaxTurnCacheMisses)
+	}
+	return e.MaxTurnCacheMisses
+}
+
 // ExtractEngineConfig extracts engine configuration from frontmatter, supporting both string and object formats
 func (c *Compiler) ExtractEngineConfig(frontmatter map[string]any) (string, *EngineConfig) {
 	topLevelMaxTurns := parseMaxTurnsValue(frontmatter["max-turns"])
 	topLevelMaxToolDenials := parseMaxToolDenialsValue(frontmatter["max-tool-denials"])
 	topLevelMaxAICredits := parseMaxAICreditsValue(frontmatter["max-ai-credits"])
+	topLevelMaxTurnCacheMisses := parseMaxTurnCacheMissesValue(frontmatter["max-turn-cache-misses"])
 	topLevelMaxRuns := parseMaxRunsValue(frontmatter["max-turns"])
 	if topLevelMaxRuns == 0 {
 		topLevelMaxRuns = parseMaxRunsValue(frontmatter["max-runs"])
@@ -174,11 +202,12 @@ func (c *Compiler) ExtractEngineConfig(frontmatter map[string]any) (string, *Eng
 		if engineStr, ok := engine.(string); ok {
 			engineLog.Printf("Found engine in string format: %s", engineStr)
 			return engineStr, &EngineConfig{
-				ID:             engineStr,
-				MaxTurns:       topLevelMaxTurns,
-				MaxToolDenials: topLevelMaxToolDenials,
-				MaxRuns:        topLevelMaxRuns,
-				MaxAICredits:   topLevelMaxAICredits,
+				ID:                 engineStr,
+				MaxTurns:           topLevelMaxTurns,
+				MaxToolDenials:     topLevelMaxToolDenials,
+				MaxRuns:            topLevelMaxRuns,
+				MaxTurnCacheMisses: topLevelMaxTurnCacheMisses,
+				MaxAICredits:       topLevelMaxAICredits,
 			}
 		}
 
@@ -255,6 +284,7 @@ func (c *Compiler) ExtractEngineConfig(frontmatter map[string]any) (string, *Eng
 					config.MaxToolDenials = topLevelMaxToolDenials
 				}
 				config.MaxRuns = topLevelMaxRuns
+				config.MaxTurnCacheMisses = topLevelMaxTurnCacheMisses
 				config.MaxAICredits = topLevelMaxAICredits
 
 				engineLog.Printf("Extracted inline engine definition: runtimeID=%s, providerID=%s", config.ID, config.InlineProviderID)
@@ -277,6 +307,14 @@ func (c *Compiler) ExtractEngineConfig(frontmatter map[string]any) (string, *Eng
 			if model, hasModel := engineObj["model"]; hasModel {
 				if modelStr, ok := model.(string); ok {
 					config.Model = modelStr
+				}
+			}
+
+			// Extract optional 'model-provider' field.
+			providerValue, hasProvider := engineObj["model-provider"]
+			if hasProvider {
+				if providerStr, ok := providerValue.(string); ok {
+					config.LLMProvider = strings.ToLower(strings.TrimSpace(providerStr))
 				}
 			}
 
@@ -365,19 +403,27 @@ func (c *Compiler) ExtractEngineConfig(frontmatter map[string]any) (string, *Eng
 				}
 			}
 
-			// Extract optional 'copilot-sdk-driver' field (string - validated separately)
-			if sdkDriver, hasSDKDriver := engineObj["copilot-sdk-driver"]; hasSDKDriver {
+			// Extract optional 'driver' / 'copilot-sdk-driver' field (string - validated separately).
+			// Both keys map to the shared Driver field. 'copilot-sdk-driver' is accepted for
+			// backward compatibility; 'driver' is the canonical name going forward.
+			if driver, hasDriver := engineObj["driver"]; hasDriver {
+				if driverStr, ok := driver.(string); ok {
+					config.Driver = driverStr
+					engineLog.Printf("Extracted engine.driver: %s", driverStr)
+				}
+			} else if sdkDriver, hasSDKDriver := engineObj["copilot-sdk-driver"]; hasSDKDriver {
 				if sdkDriverStr, ok := sdkDriver.(string); ok {
-					config.CopilotSDKDriver = sdkDriverStr
+					config.Driver = sdkDriverStr
+					engineLog.Printf("Extracted engine.copilot-sdk-driver (→ driver): %s", sdkDriverStr)
 				}
 			}
 
-			// Extract optional 'env' field (object/map of strings)
+			// Extract optional 'env' field (object/map of scalar values)
 			if env, hasEnv := engineObj["env"]; hasEnv {
 				if envMap, ok := env.(map[string]any); ok {
 					config.Env = make(map[string]string)
 					for key, value := range envMap {
-						if valueStr, ok := value.(string); ok {
+						if valueStr, ok := toEngineEnvValueString(value); ok {
 							config.Env[key] = valueStr
 						}
 					}
@@ -494,6 +540,7 @@ func (c *Compiler) ExtractEngineConfig(frontmatter map[string]any) (string, *Eng
 				config.MaxTurns = topLevelMaxTurns
 			}
 			config.MaxRuns = topLevelMaxRuns
+			config.MaxTurnCacheMisses = topLevelMaxTurnCacheMisses
 			config.MaxAICredits = topLevelMaxAICredits
 
 			// Extract optional 'copilot-sdk' field (bool; copilot engine only)
@@ -503,9 +550,9 @@ func (c *Compiler) ExtractEngineConfig(frontmatter map[string]any) (string, *Eng
 					engineLog.Printf("Extracted copilot-sdk: %v", config.CopilotSDK)
 				}
 			}
-			if config.CopilotSDKDriver != "" && !config.CopilotSDK {
+			if config.Driver != "" && config.ID == "copilot" && !config.CopilotSDK {
 				config.CopilotSDK = true
-				engineLog.Print("Enabled copilot-sdk because copilot-sdk-driver is configured")
+				engineLog.Print("Enabled copilot-sdk because driver is configured for copilot engine")
 			}
 
 			engineLog.Printf("Extracted engine configuration: ID=%s", config.ID)
@@ -513,12 +560,13 @@ func (c *Compiler) ExtractEngineConfig(frontmatter map[string]any) (string, *Eng
 		}
 	}
 
-	if topLevelMaxTurns != "" || topLevelMaxToolDenials != "" || topLevelMaxAICredits != 0 || topLevelMaxRuns > 0 {
+	if topLevelMaxTurns != "" || topLevelMaxToolDenials != "" || topLevelMaxAICredits != 0 || topLevelMaxRuns > 0 || topLevelMaxTurnCacheMisses > 0 {
 		return "", &EngineConfig{
-			MaxTurns:       topLevelMaxTurns,
-			MaxToolDenials: topLevelMaxToolDenials,
-			MaxRuns:        topLevelMaxRuns,
-			MaxAICredits:   topLevelMaxAICredits,
+			MaxTurns:           topLevelMaxTurns,
+			MaxToolDenials:     topLevelMaxToolDenials,
+			MaxRuns:            topLevelMaxRuns,
+			MaxTurnCacheMisses: topLevelMaxTurnCacheMisses,
+			MaxAICredits:       topLevelMaxAICredits,
 		}
 	}
 

@@ -195,6 +195,13 @@ func (c *Compiler) extractSafeOutputsConfig(frontmatter map[string]any) *SafeOut
 				}
 			}
 
+			// Parse URL sanitization policy
+			if urls, exists := outputMap["urls"]; exists {
+				if urlsStr, ok := urls.(string); ok {
+					config.URLs = urlsStr
+				}
+			}
+
 			// Parse allowed-github-references configuration
 			if allowGitHubRefs, exists := outputMap["allowed-github-references"]; exists {
 				if refsArray, ok := allowGitHubRefs.([]any); ok {
@@ -218,6 +225,12 @@ func (c *Compiler) extractSafeOutputsConfig(frontmatter map[string]any) *SafeOut
 			removeLabelsConfig := c.parseRemoveLabelsConfig(outputMap)
 			if removeLabelsConfig != nil {
 				config.RemoveLabels = removeLabelsConfig
+			}
+
+			// Parse replace-label configuration
+			replaceLabelConfig := c.parseReplaceLabelConfig(outputMap)
+			if replaceLabelConfig != nil {
+				config.ReplaceLabel = replaceLabelConfig
 			}
 
 			// Parse add-reviewer configuration
@@ -527,9 +540,7 @@ func (c *Compiler) extractSafeOutputsConfig(frontmatter map[string]any) *SafeOut
 
 			// Handle runs-on configuration
 			if runsOn, exists := outputMap["runs-on"]; exists {
-				if runsOnStr, ok := runsOn.(string); ok {
-					config.RunsOn = runsOnStr
-				}
+				config.RunsOn = renderRunsOnSnippet(runsOn)
 			}
 
 			// Handle timeout-minutes configuration
@@ -615,11 +626,37 @@ func (c *Compiler) extractSafeOutputsConfig(frontmatter map[string]any) *SafeOut
 				}
 			}
 
-			// Handle report-failure-as-issue flag
+			// Handle report-failure-as-issue flag or array of categories
 			if reportFailureAsIssue, exists := outputMap["report-failure-as-issue"]; exists {
+				// Support both bool (legacy) and []any (new with categories filter)
 				if reportFailureAsIssueBool, ok := reportFailureAsIssue.(bool); ok {
-					config.ReportFailureAsIssue = &reportFailureAsIssueBool
+					config.ReportFailureAsIssue = reportFailureAsIssueBool
 					safeOutputsConfigLog.Printf("Report failure as issue: %t", reportFailureAsIssueBool)
+				} else if categoriesList, ok := reportFailureAsIssue.([]any); ok {
+					// Parse as array of category strings, separating included (no prefix) and excluded (! prefix)
+					includedCategories := make([]string, 0, len(categoriesList))
+					excludedCategories := make([]string, 0, len(categoriesList))
+					for _, cat := range categoriesList {
+						if catStr, ok := cat.(string); ok {
+							if category, found := strings.CutPrefix(catStr, "!"); found {
+								// Excluded category: "!" prefix was found and removed
+								excludedCategories = append(excludedCategories, category)
+							} else {
+								// Included category: no prefix
+								includedCategories = append(includedCategories, catStr)
+							}
+						}
+					}
+					config.ReportFailureAsIssue = reportFailureAsIssue // Preserve original value for proper serialization
+					config.ReportFailureAsIssueCategories = includedCategories
+					config.ReportFailureAsIssueExcludedCategories = excludedCategories
+					if len(includedCategories) > 0 && len(excludedCategories) > 0 {
+						safeOutputsConfigLog.Printf("Report failure as issue with include filter: %v, exclude filter: %v", includedCategories, excludedCategories)
+					} else if len(includedCategories) > 0 {
+						safeOutputsConfigLog.Printf("Report failure as issue with include filter: %v", includedCategories)
+					} else if len(excludedCategories) > 0 {
+						safeOutputsConfigLog.Printf("Report failure as issue with exclude filter: %v", excludedCategories)
+					}
 				}
 			}
 
@@ -691,7 +728,7 @@ func (c *Compiler) extractSafeOutputsConfig(frontmatter map[string]any) *SafeOut
 			// Handle jobs (safe-jobs must be under safe-outputs)
 			if jobs, exists := outputMap["jobs"]; exists {
 				if jobsMap, ok := jobs.(map[string]any); ok {
-					c := &Compiler{} // Create a temporary compiler instance for parsing
+					c := NewCompiler() // Create a temporary compiler instance for parsing
 					config.Jobs = c.parseSafeJobsConfig(jobsMap)
 				}
 			}
@@ -969,14 +1006,17 @@ func buildMentionsHandlerConfig(m *MentionsConfig) map[string]any {
 	if m.Enabled != nil {
 		cfg["enabled"] = *m.Enabled
 	}
-	if m.AllowTeamMembers != nil {
-		cfg["allowTeamMembers"] = *m.AllowTeamMembers
+	if m.AllowedCollaborators != nil {
+		cfg["allowedCollaborators"] = *m.AllowedCollaborators
 	}
 	if m.AllowContext != nil {
 		cfg["allowContext"] = *m.AllowContext
 	}
 	if len(m.Allowed) > 0 {
 		cfg["allowed"] = m.Allowed
+	}
+	if len(m.AllowedTeams) > 0 {
+		cfg["allowedTeams"] = m.AllowedTeams
 	}
 	if m.Max != nil {
 		cfg["max"] = *m.Max

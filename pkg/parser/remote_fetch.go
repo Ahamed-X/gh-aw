@@ -109,12 +109,12 @@ func isUnderWorkflowsDirectory(filePath string) bool {
 	normalizedPath := filepath.ToSlash(filePath)
 
 	// Check if the path contains .github/workflows/
-	if !strings.Contains(normalizedPath, ".github/workflows/") {
+	if !strings.Contains(normalizedPath, constants.WorkflowsDirSlash) {
 		return false
 	}
 
 	// Extract the part after .github/workflows/
-	parts := strings.Split(normalizedPath, ".github/workflows/")
+	parts := strings.Split(normalizedPath, constants.WorkflowsDirSlash)
 	if len(parts) < 2 {
 		return false
 	}
@@ -134,7 +134,7 @@ func isCustomAgentFile(filePath string) bool {
 	normalizedPath := filepath.ToSlash(filePath)
 
 	// Check if the path contains .github/agents/ and ends with .md
-	return strings.Contains(normalizedPath, ".github/agents/") && strings.HasSuffix(strings.ToLower(normalizedPath), ".md")
+	return strings.Contains(normalizedPath, constants.AgentsDir) && strings.HasSuffix(strings.ToLower(normalizedPath), ".md")
 }
 
 // isRepositoryImport checks if an import spec is a repository-only import (no file path)
@@ -239,10 +239,10 @@ func computeIncludeResolveAndSecurityBases(filePath, baseDir string) (string, st
 	if strings.HasSuffix(githubFolder, ".github") {
 		repoRoot := filepath.Dir(githubFolder)
 		filePathSlash := filepath.ToSlash(filePath)
-		if strings.HasPrefix(filePathSlash, ".github/") {
+		if strings.HasPrefix(filePathSlash, constants.GithubDir) {
 			resolveBase = repoRoot
 		} else if stripped, ok := strings.CutPrefix(filePathSlash, "/"); ok {
-			if !strings.HasPrefix(stripped, ".github/") && !strings.HasPrefix(stripped, ".agents/") {
+			if !strings.HasPrefix(stripped, constants.GithubDir) && !strings.HasPrefix(stripped, ".agents/") {
 				return "", "", filePath
 			}
 			normalizedFilePath = filepath.FromSlash(stripped)
@@ -259,7 +259,7 @@ func computeIncludeResolveAndSecurityBases(filePath, baseDir string) (string, st
 
 func resolveAndValidateLocalIncludePath(filePath, resolveBase, securityBase string) (string, error) {
 	if stripped, ok := strings.CutPrefix(filepath.ToSlash(filePath), "/"); ok {
-		if !strings.HasPrefix(stripped, ".github/") && !strings.HasPrefix(stripped, ".agents/") {
+		if !strings.HasPrefix(stripped, constants.GithubDir) && !strings.HasPrefix(stripped, ".agents/") {
 			remoteLog.Printf("Security: Path not within .github or .agents: %s", filePath)
 			return "", fmt.Errorf("security: path %s must be within .github or .agents folder", filePath)
 		}
@@ -525,7 +525,10 @@ func resolveRefToSHA(owner, repo, ref, host string) (string, error) {
 			// Try fallback using git ls-remote for public repositories
 			sha, gitErr := resolveRefToSHAViaGit(owner, repo, ref, host)
 			if gitErr != nil {
-				// If git fallback also fails, return both errors
+				if host == "" || host == "github.com" {
+					remoteLog.Printf("Git fallback also failed, attempting unauthenticated API for %s/%s@%s", owner, repo, ref)
+					return resolveRefToSHAViaPublicAPI(owner, repo, ref)
+				}
 				return "", fmt.Errorf("failed to resolve ref via GitHub API (auth error) and git ls-remote: API error: %w, Git error: %w", err, gitErr)
 			}
 			return sha, nil
@@ -551,6 +554,45 @@ func resolveRefToSHA(owner, repo, ref, host string) (string, error) {
 // URL-escaping the ref segment so branch names containing slashes are valid.
 func buildCommitLookupAPIPath(owner, repo, ref string) string {
 	return fmt.Sprintf("/repos/%s/%s/commits/%s", owner, repo, url.PathEscape(ref))
+}
+
+// resolveRefToSHAViaPublicAPI resolves a git ref to its commit SHA using an
+// unauthenticated call to the public GitHub API. Used as a last-resort fallback
+// when both authenticated API and git ls-remote fail.
+func resolveRefToSHAViaPublicAPI(owner, repo, ref string) (string, error) {
+	remoteLog.Printf("Attempting unauthenticated public API ref resolution for %s/%s@%s", owner, repo, ref)
+	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/commits/%s",
+		owner, repo, url.PathEscape(ref))
+	req, err := http.NewRequest(http.MethodGet, apiURL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("unauthenticated public API failed for %s/%s@%s: HTTP %d: %s", owner, repo, ref, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var result struct {
+		SHA string `json:"sha"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", fmt.Errorf("failed to parse commit response: %w", err)
+	}
+	if result.SHA == "" || len(result.SHA) != 40 || !gitutil.IsHexString(result.SHA) {
+		return "", fmt.Errorf("invalid SHA returned from public API: %q", result.SHA)
+	}
+	return result.SHA, nil
 }
 
 // downloadFileViaGit downloads a file from a Git repository using git commands
@@ -702,7 +744,7 @@ func downloadFileViaGitClone(owner, repo, path, ref, host string) ([]byte, error
 // Returns the symlink target and true if it is a symlink, or empty string and false otherwise.
 // A nil error with false means the path is not a symlink (e.g., it's a directory or file).
 func checkRemoteSymlink(client *api.RESTClient, owner, repo, dirPath, ref string) (string, bool, error) {
-	endpoint := fmt.Sprintf("repos/%s/%s/contents/%s?ref=%s", owner, repo, dirPath, ref)
+	endpoint := buildContentsAPIPath(owner, repo, dirPath, ref)
 	remoteLog.Printf("Checking if path component is symlink: %s/%s/%s@%s", owner, repo, dirPath, ref)
 
 	// The Contents API returns a JSON object for files/symlinks but a JSON array for directories.
@@ -878,6 +920,10 @@ func downloadFileFromGitHubWithDepth(owner, repo, path, ref string, symlinkDepth
 			remoteLog.Printf("GitHub API authentication failed, attempting git fallback for %s/%s/%s@%s", owner, repo, path, ref)
 			content, gitErr := downloadFileViaGit(context.Background(), owner, repo, path, ref, host)
 			if gitErr != nil {
+				if host == "" || host == "github.com" {
+					remoteLog.Printf("Git fallback also failed, attempting unauthenticated API for %s/%s/%s@%s", owner, repo, path, ref)
+					return downloadFileViaPublicAPI(owner, repo, path, ref)
+				}
 				return nil, fmt.Errorf("failed to fetch file content via GitHub API (auth error) and git fallback: API error: %w, Git error: %w", err, gitErr)
 			}
 			return content, nil
@@ -905,14 +951,57 @@ func downloadFileFromGitHubWithDepth(owner, repo, path, ref string, symlinkDepth
 }
 
 func createRESTClientForHost(host string) (*api.RESTClient, error) {
+	opts := api.ClientOptions{Timeout: constants.DefaultHTTPClientTimeout}
 	if host != "" {
-		return api.NewRESTClient(api.ClientOptions{Host: host})
+		opts.Host = host
 	}
-	return api.DefaultRESTClient()
+	return api.NewRESTClient(opts)
+}
+
+func buildContentsAPIPath(owner, repo, path, ref string) string {
+	pathSegments := strings.Split(path, "/")
+	for i := range pathSegments {
+		pathSegments[i] = url.PathEscape(pathSegments[i])
+	}
+	return fmt.Sprintf(
+		"repos/%s/%s/contents/%s?ref=%s",
+		owner,
+		repo,
+		strings.Join(pathSegments, "/"),
+		url.QueryEscape(ref),
+	)
 }
 
 func fetchRemoteFileContent(client *api.RESTClient, owner, repo, path, ref string, fileContent any) error {
-	return client.Get(fmt.Sprintf("repos/%s/%s/contents/%s?ref=%s", owner, repo, path, ref), fileContent)
+	return client.Get(buildContentsAPIPath(owner, repo, path, ref), fileContent)
+}
+
+// downloadFileViaPublicAPI downloads a file from a public GitHub repository
+// using an unauthenticated API call. Used as a last-resort fallback when both
+// authenticated API and git clone fail (e.g. enterprise SAML tokens).
+func downloadFileViaPublicAPI(owner, repo, path, ref string) ([]byte, error) {
+	remoteLog.Printf("Attempting unauthenticated public API download for %s/%s/%s@%s", owner, repo, path, ref)
+	body, err := fetchPublicGitHubContentsAPI(owner, repo, path, ref)
+	if err != nil {
+		return nil, fmt.Errorf("unauthenticated public API also failed for %s/%s/%s@%s: %w", owner, repo, path, ref, err)
+	}
+
+	var fileContent struct {
+		Content  string `json:"content"`
+		Encoding string `json:"encoding"`
+	}
+	if err := json.Unmarshal(body, &fileContent); err != nil {
+		return nil, fmt.Errorf("failed to parse public API file response: %w", err)
+	}
+	if fileContent.Content == "" {
+		return nil, fmt.Errorf("empty content returned from public API for %s/%s/%s@%s", owner, repo, path, ref)
+	}
+
+	content, err := base64.StdEncoding.DecodeString(fileContent.Content)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode base64 content from public API: %w", err)
+	}
+	return content, nil
 }
 
 func retryDownloadViaResolvedSymlink(
@@ -946,16 +1035,7 @@ func ListWorkflowFilesForHost(owner, repo, ref, workflowPath, host string) ([]st
 func listWorkflowFilesForHost(owner, repo, ref, workflowPath, host string) ([]string, error) {
 	remoteLog.Printf("Listing workflow files for %s/%s@%s (path: %s)", owner, repo, ref, workflowPath)
 
-	// Create REST client
-	var (
-		client *api.RESTClient
-		err    error
-	)
-	if host != "" {
-		client, err = api.NewRESTClient(api.ClientOptions{Host: host})
-	} else {
-		client, err = api.DefaultRESTClient()
-	}
+	client, err := createRESTClientForHost(host)
 	if err != nil {
 		remoteLog.Printf("Failed to create REST client, attempting git fallback: %v", err)
 		return listWorkflowFilesViaGitForHost(owner, repo, ref, workflowPath, host)
@@ -969,7 +1049,7 @@ func listWorkflowFilesForHost(owner, repo, ref, workflowPath, host string) ([]st
 	}
 
 	// Fetch directory contents from GitHub API
-	endpoint := fmt.Sprintf("repos/%s/%s/contents/%s?ref=%s", owner, repo, workflowPath, ref)
+	endpoint := buildContentsAPIPath(owner, repo, workflowPath, ref)
 	err = client.Get(endpoint, &contents)
 	if err != nil {
 		errStr := err.Error()
@@ -980,7 +1060,10 @@ func listWorkflowFilesForHost(owner, repo, ref, workflowPath, host string) ([]st
 			// Try fallback using git commands for public repositories
 			files, gitErr := listWorkflowFilesViaGitForHost(owner, repo, ref, workflowPath, host)
 			if gitErr != nil {
-				// If git fallback also fails, return both errors
+				if host == "" || host == "github.com" {
+					remoteLog.Printf("Git fallback also failed, attempting unauthenticated API for %s/%s@%s", owner, repo, ref)
+					return listWorkflowFilesViaPublicAPI(owner, repo, ref, workflowPath)
+				}
 				return nil, fmt.Errorf("failed to list workflow files via GitHub API (auth error) and git fallback: API error: %w, Git error: %w", err, gitErr)
 			}
 			return files, nil
@@ -1011,15 +1094,7 @@ func ListDirAllFilesForHost(owner, repo, ref, dirPath, host string) ([]string, e
 func listDirAllFilesForHost(owner, repo, ref, dirPath, host string) ([]string, error) {
 	remoteLog.Printf("Listing all files in dir for %s/%s@%s (path: %s)", owner, repo, ref, dirPath)
 
-	var (
-		client *api.RESTClient
-		err    error
-	)
-	if host != "" {
-		client, err = api.NewRESTClient(api.ClientOptions{Host: host})
-	} else {
-		client, err = api.DefaultRESTClient()
-	}
+	client, err := createRESTClientForHost(host)
 	if err != nil {
 		remoteLog.Printf("Failed to create REST client, attempting git fallback: %v", err)
 		return listDirAllFilesViaGitForHost(owner, repo, ref, dirPath, host)
@@ -1031,7 +1106,7 @@ func listDirAllFilesForHost(owner, repo, ref, dirPath, host string) ([]string, e
 		Type string `json:"type"`
 	}
 
-	endpoint := fmt.Sprintf("repos/%s/%s/contents/%s?ref=%s", owner, repo, dirPath, ref)
+	endpoint := buildContentsAPIPath(owner, repo, dirPath, ref)
 	err = client.Get(endpoint, &contents)
 	if err != nil {
 		errStr := err.Error()
@@ -1039,6 +1114,10 @@ func listDirAllFilesForHost(owner, repo, ref, dirPath, host string) ([]string, e
 			remoteLog.Printf("GitHub API auth failed, attempting git fallback for %s/%s@%s", owner, repo, ref)
 			files, gitErr := listDirAllFilesViaGitForHost(owner, repo, ref, dirPath, host)
 			if gitErr != nil {
+				if host == "" || host == "github.com" {
+					remoteLog.Printf("Git fallback also failed, attempting unauthenticated API for %s/%s@%s", owner, repo, ref)
+					return listDirAllFilesViaPublicAPI(owner, repo, ref, dirPath)
+				}
 				return nil, fmt.Errorf("failed to list dir files via API (auth error) and git fallback: API error: %w, Git error: %w", err, gitErr)
 			}
 			return files, nil
@@ -1090,6 +1169,34 @@ func listDirAllFilesViaGitForHost(owner, repo, ref, dirPath, host string) ([]str
 	return files, nil
 }
 
+// listDirAllFilesViaPublicAPI lists files in a directory using an unauthenticated
+// call to the public GitHub API. Used as a last-resort fallback when both
+// authenticated API and git clone fail.
+func listDirAllFilesViaPublicAPI(owner, repo, ref, dirPath string) ([]string, error) {
+	remoteLog.Printf("Attempting unauthenticated public API for listing dir files: %s/%s@%s (path: %s)", owner, repo, ref, dirPath)
+	body, err := fetchPublicGitHubContentsAPI(owner, repo, dirPath, ref)
+	if err != nil {
+		return nil, fmt.Errorf("unauthenticated public API also failed for %s/%s@%s (path: %s): %w", owner, repo, ref, dirPath, err)
+	}
+
+	var contents []struct {
+		Path string `json:"path"`
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(body, &contents); err != nil {
+		return nil, fmt.Errorf("failed to parse public API response: %w", err)
+	}
+
+	var files []string
+	for _, item := range contents {
+		if item.Type == "file" {
+			files = append(files, item.Path)
+		}
+	}
+	remoteLog.Printf("Found %d files via public API for %s/%s@%s (path: %s)", len(files), owner, repo, ref, dirPath)
+	return files, nil
+}
+
 // ListDirAllFilesRecursivelyForHost lists all files (any extension) that are under the
 // given directory in a remote GitHub repository, including files in subdirectories at any
 // depth. This is used for copying entire skill folders.
@@ -1100,15 +1207,7 @@ func ListDirAllFilesRecursivelyForHost(owner, repo, ref, dirPath, host string) (
 func listDirAllFilesRecursivelyForHost(owner, repo, ref, dirPath, host string) ([]string, error) {
 	remoteLog.Printf("Listing all files recursively in dir for %s/%s@%s (path: %s)", owner, repo, ref, dirPath)
 
-	var (
-		client *api.RESTClient
-		err    error
-	)
-	if host != "" {
-		client, err = api.NewRESTClient(api.ClientOptions{Host: host})
-	} else {
-		client, err = api.DefaultRESTClient()
-	}
+	client, err := createRESTClientForHost(host)
 	if err != nil {
 		remoteLog.Printf("Failed to create REST client, attempting git fallback: %v", err)
 		return listDirAllFilesRecursivelyViaGitForHost(owner, repo, ref, dirPath, host)
@@ -1121,6 +1220,9 @@ func listDirAllFilesRecursivelyForHost(owner, repo, ref, dirPath, host string) (
 			remoteLog.Printf("GitHub API auth failed, attempting git fallback for %s/%s@%s", owner, repo, ref)
 			gitFiles, gitErr := listDirAllFilesRecursivelyViaGitForHost(owner, repo, ref, dirPath, host)
 			if gitErr != nil {
+				// No public API fallback for recursive listing — would require
+				// multiple unauthenticated calls and is unlikely to stay within
+				// the 60 req/hour rate limit. Surface both errors.
 				return nil, fmt.Errorf("failed to list dir files recursively via API (auth error) and git fallback: API error: %w, Git error: %w", err, gitErr)
 			}
 			return gitFiles, nil
@@ -1150,7 +1252,7 @@ func listContentsRecursivelyWithDepth(client *api.RESTClient, owner, repo, ref, 
 		Type string `json:"type"`
 	}
 
-	endpoint := fmt.Sprintf("repos/%s/%s/contents/%s?ref=%s", owner, repo, dirPath, ref)
+	endpoint := buildContentsAPIPath(owner, repo, dirPath, ref)
 	if err := client.Get(endpoint, &contents); err != nil {
 		return nil, fmt.Errorf("failed to list dir files from %s/%s (path: %s): %w", owner, repo, dirPath, err)
 	}
@@ -1203,6 +1305,45 @@ func listDirAllFilesRecursivelyViaGitForHost(owner, repo, ref, dirPath, host str
 	return files, nil
 }
 
+// fetchPublicGitHubContentsAPI makes an unauthenticated GET request to the
+// GitHub public REST API contents endpoint. This is used as a last-resort
+// fallback when the current token (e.g. an enterprise SAML-enforced token)
+// cannot access cross-organization public repositories and git clone also
+// fails. Unauthenticated requests are subject to a lower rate limit
+// (60 req/hour) but are sufficient for the handful of calls during update.
+func fetchPublicGitHubContentsAPI(owner, repo, path, ref string) ([]byte, error) {
+	// Encode each path segment independently so that '/' separators are
+	// preserved — url.PathEscape would turn them into '%2F', breaking nested
+	// paths like '.github/workflows/shared/foo.md'.
+	segments := strings.Split(path, "/")
+	encodedSegments := make([]string, len(segments))
+	for i, s := range segments {
+		encodedSegments[i] = url.PathEscape(s)
+	}
+	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/%s/contents/%s?ref=%s",
+		owner, repo, strings.Join(encodedSegments, "/"), url.QueryEscape(ref))
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return body, nil
+}
+
 // ListDirSubdirsForHost lists subdirectory paths that are direct children of the given
 // directory in a remote GitHub repository. This is used for auto-discovering skill dirs.
 func ListDirSubdirsForHost(owner, repo, ref, dirPath, host string) ([]string, error) {
@@ -1212,15 +1353,7 @@ func ListDirSubdirsForHost(owner, repo, ref, dirPath, host string) ([]string, er
 func listDirSubdirsForHost(owner, repo, ref, dirPath, host string) ([]string, error) {
 	remoteLog.Printf("Listing subdirs in %s/%s@%s (path: %s)", owner, repo, ref, dirPath)
 
-	var (
-		client *api.RESTClient
-		err    error
-	)
-	if host != "" {
-		client, err = api.NewRESTClient(api.ClientOptions{Host: host})
-	} else {
-		client, err = api.DefaultRESTClient()
-	}
+	client, err := createRESTClientForHost(host)
 	if err != nil {
 		remoteLog.Printf("Failed to create REST client, attempting git fallback: %v", err)
 		return listDirSubdirsViaGitForHost(owner, repo, ref, dirPath, host)
@@ -1232,7 +1365,7 @@ func listDirSubdirsForHost(owner, repo, ref, dirPath, host string) ([]string, er
 		Type string `json:"type"`
 	}
 
-	endpoint := fmt.Sprintf("repos/%s/%s/contents/%s?ref=%s", owner, repo, dirPath, ref)
+	endpoint := buildContentsAPIPath(owner, repo, dirPath, ref)
 	err = client.Get(endpoint, &contents)
 	if err != nil {
 		errStr := err.Error()
@@ -1240,6 +1373,10 @@ func listDirSubdirsForHost(owner, repo, ref, dirPath, host string) ([]string, er
 			remoteLog.Printf("GitHub API auth failed, attempting git fallback for %s/%s@%s", owner, repo, ref)
 			dirs, gitErr := listDirSubdirsViaGitForHost(owner, repo, ref, dirPath, host)
 			if gitErr != nil {
+				if host == "" || host == "github.com" {
+					remoteLog.Printf("Git fallback also failed, attempting unauthenticated API for %s/%s@%s", owner, repo, ref)
+					return listDirSubdirsViaPublicAPI(owner, repo, ref, dirPath)
+				}
 				return nil, fmt.Errorf("failed to list subdirs via API (auth error) and git fallback: API error: %w, Git error: %w", err, gitErr)
 			}
 			return dirs, nil
@@ -1288,6 +1425,35 @@ func listDirSubdirsViaGitForHost(owner, repo, ref, dirPath, host string) ([]stri
 	}
 
 	remoteLog.Printf("Found %d subdirs via git for %s/%s@%s (path: %s)", len(dirs), owner, repo, ref, dirPath)
+	return dirs, nil
+}
+
+// listDirSubdirsViaPublicAPI lists subdirectories using an unauthenticated call
+// to the public GitHub API. Used as a last-resort fallback when both
+// authenticated API and git clone fail (e.g. enterprise SAML tokens).
+func listDirSubdirsViaPublicAPI(owner, repo, ref, dirPath string) ([]string, error) {
+	remoteLog.Printf("Attempting unauthenticated public API for listing subdirs: %s/%s@%s (path: %s)", owner, repo, ref, dirPath)
+	body, err := fetchPublicGitHubContentsAPI(owner, repo, dirPath, ref)
+	if err != nil {
+		return nil, fmt.Errorf("unauthenticated public API also failed for %s/%s@%s (path: %s): %w", owner, repo, ref, dirPath, err)
+	}
+
+	var contents []struct {
+		Name string `json:"name"`
+		Path string `json:"path"`
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(body, &contents); err != nil {
+		return nil, fmt.Errorf("failed to parse public API response: %w", err)
+	}
+
+	var dirs []string
+	for _, item := range contents {
+		if item.Type == "dir" {
+			dirs = append(dirs, item.Path)
+		}
+	}
+	remoteLog.Printf("Found %d subdirs via public API for %s/%s@%s (path: %s)", len(dirs), owner, repo, ref, dirPath)
 	return dirs, nil
 }
 
@@ -1343,5 +1509,34 @@ func listWorkflowFilesViaGitForHost(owner, repo, ref, workflowPath, host string)
 	}
 
 	remoteLog.Printf("Found %d workflow files via git for %s/%s@%s (path: %s)", len(workflowFiles), owner, repo, ref, workflowPath)
+	return workflowFiles, nil
+}
+
+// listWorkflowFilesViaPublicAPI lists workflow .md files using an unauthenticated
+// call to the public GitHub API. Used as a last-resort fallback when both
+// authenticated API and git clone fail.
+func listWorkflowFilesViaPublicAPI(owner, repo, ref, workflowPath string) ([]string, error) {
+	remoteLog.Printf("Attempting unauthenticated public API for listing workflow files: %s/%s@%s (path: %s)", owner, repo, ref, workflowPath)
+	body, err := fetchPublicGitHubContentsAPI(owner, repo, workflowPath, ref)
+	if err != nil {
+		return nil, fmt.Errorf("unauthenticated public API also failed for %s/%s@%s (path: %s): %w", owner, repo, ref, workflowPath, err)
+	}
+
+	var contents []struct {
+		Name string `json:"name"`
+		Path string `json:"path"`
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(body, &contents); err != nil {
+		return nil, fmt.Errorf("failed to parse public API response: %w", err)
+	}
+
+	var workflowFiles []string
+	for _, item := range contents {
+		if item.Type == "file" && strings.HasSuffix(strings.ToLower(item.Name), ".md") {
+			workflowFiles = append(workflowFiles, item.Path)
+		}
+	}
+	remoteLog.Printf("Found %d workflow files via public API for %s/%s@%s (path: %s)", len(workflowFiles), owner, repo, ref, workflowPath)
 	return workflowFiles, nil
 }

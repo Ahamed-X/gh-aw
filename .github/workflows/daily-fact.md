@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "📚"
 description: Posts a daily poetic verse about the gh-aw project to a discussion thread
 on:
@@ -62,6 +63,8 @@ safe-outputs:
 imports:
   - shared/otlp.md
   - shared/mcp/mempalace.md
+features:
+  gh-aw-detection: true
 ---
 
 {{#runtime-import? .github/shared-instructions.md}}

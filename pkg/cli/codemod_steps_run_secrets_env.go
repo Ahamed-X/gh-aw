@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/github/gh-aw/pkg/logger"
+	"github.com/github/gh-aw/pkg/setutil"
 )
 
 var stepsRunSecretsEnvCodemodLog = logger.New("cli:codemod_steps_run_secrets_env")
@@ -152,7 +153,8 @@ func transformStepsWithinSection(sectionLines []string, sectionIndent string) ([
 
 func rewriteStepRunSecretsToEnv(stepLines []string, stepIndent string) ([]string, bool) {
 	modified := false
-	seen := make(map[string]bool)
+	seen := make(map[string]struct {
+	})
 	orderedBindings := make([]string, 0)
 	bindingExprs := make(map[string]string)
 	firstRunLine := -1
@@ -160,7 +162,8 @@ func rewriteStepRunSecretsToEnv(stepLines []string, stepIndent string) ([]string
 	envEnd := -1
 	envIndent := ""
 	var envKeyIndentLen int
-	existingEnvKeys := make(map[string]bool)
+	existingEnvKeys := make(map[string]struct {
+	})
 
 	// First pass: detect shell type so PowerShell steps get $env:VARNAME syntax.
 	// Restrict the scan to lines at the direct step-key indentation level so
@@ -209,7 +212,8 @@ func rewriteStepRunSecretsToEnv(stepLines []string, stepIndent string) ([]string
 				envEnd = j
 				key := parseYAMLMapKey(t)
 				if key != "" {
-					existingEnvKeys[key] = true
+					existingEnvKeys[key] = struct {
+					}{}
 				}
 			}
 		}
@@ -244,8 +248,9 @@ func rewriteStepRunSecretsToEnv(stepLines []string, stepIndent string) ([]string
 					modified = true
 				}
 				for _, binding := range bindings {
-					if !seen[binding.Name] {
-						seen[binding.Name] = true
+					if !setutil.Contains(seen, binding.Name) {
+						seen[binding.Name] = struct {
+						}{}
 						orderedBindings = append(orderedBindings, binding.Name)
 						bindingExprs[binding.Name] = binding.Expression
 					}
@@ -260,8 +265,9 @@ func rewriteStepRunSecretsToEnv(stepLines []string, stepIndent string) ([]string
 			modified = true
 		}
 		for _, binding := range bindings {
-			if !seen[binding.Name] {
-				seen[binding.Name] = true
+			if !setutil.Contains(seen, binding.Name) {
+				seen[binding.Name] = struct {
+				}{}
 				orderedBindings = append(orderedBindings, binding.Name)
 				bindingExprs[binding.Name] = binding.Expression
 			}
@@ -276,7 +282,7 @@ func rewriteStepRunSecretsToEnv(stepLines []string, stepIndent string) ([]string
 
 	missingBindings := make([]string, 0, len(orderedBindings))
 	for _, name := range orderedBindings {
-		if !existingEnvKeys[name] {
+		if !setutil.Contains(existingEnvKeys, name) {
 			missingBindings = append(missingBindings, name)
 		}
 	}
@@ -331,7 +337,8 @@ func replaceStepExpressionRefs(line string, shellIsPowerShell bool, existingBind
 	localNames := make(map[string]string)
 	// registeredNames tracks which names already appear in ordered, so we never
 	// add a duplicate binding entry.
-	registeredNames := make(map[string]bool)
+	registeredNames := make(map[string]struct {
+	})
 	ordered := make([]stepExpressionBinding, 0, len(matches))
 
 	for _, match := range matches {
@@ -381,8 +388,9 @@ func replaceStepExpressionRefs(line string, shellIsPowerShell bool, existingBind
 		} else {
 			result.WriteString("$" + envName)
 		}
-		if !registeredNames[envName] {
-			registeredNames[envName] = true
+		if !setutil.Contains(registeredNames, envName) {
+			registeredNames[envName] = struct {
+			}{}
 			ordered = append(ordered, stepExpressionBinding{
 				Name:       envName,
 				Expression: canonicalExpression,

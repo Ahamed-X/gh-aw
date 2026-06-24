@@ -1,4 +1,5 @@
 ---
+private: true
 description: Daily CI optimization coach that analyzes workflow runs for efficiency improvements and cost reduction opportunities
 on:
   schedule:
@@ -10,7 +11,8 @@ permissions:
   pull-requests: read
   issues: read
   copilot-requests: write
-max-ai-credits: 50000
+
+max-ai-credits: 50000
 tracker-id: ci-coach-daily
 engine:
   id: copilot
@@ -49,7 +51,8 @@ experiments:
     start_date: "2026-05-15"
     analysis_type: mann_whitney
     issue: 32335
-
+features:
+  gh-aw-detection: true
 ---
 
 # CI Optimization Coach

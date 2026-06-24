@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/github/gh-aw/pkg/constants"
+	"github.com/github/gh-aw/pkg/setutil"
 
 	"github.com/github/gh-aw/pkg/console"
 	"github.com/github/gh-aw/pkg/logger"
@@ -214,7 +215,8 @@ func generateHumanReadableName(actionName string) string {
 // extractInputs extracts input parameters from core.getInput() calls
 func extractInputs(content string) []ActionInput {
 	var inputs []ActionInput
-	seen := make(map[string]bool)
+	seen := make(map[string]struct {
+	})
 
 	// Match core.getInput('name') or core.getInput("name")
 	matches := coreGetInputPattern.FindAllStringSubmatch(content, -1)
@@ -222,14 +224,15 @@ func extractInputs(content string) []ActionInput {
 	for _, match := range matches {
 		if len(match) > 1 {
 			inputName := match[1]
-			if !seen[inputName] {
+			if !setutil.Contains(seen, inputName) {
 				inputs = append(inputs, ActionInput{
 					Name:        inputName,
 					Description: "Input parameter: " + inputName,
 					Required:    false,
 					Default:     "",
 				})
-				seen[inputName] = true
+				seen[inputName] = struct {
+				}{}
 			}
 		}
 	}
@@ -252,7 +255,8 @@ func extractInputs(content string) []ActionInput {
 // extractOutputs extracts output parameters from core.setOutput() calls
 func extractOutputs(content string) []ActionOutput {
 	var outputs []ActionOutput
-	seen := make(map[string]bool)
+	seen := make(map[string]struct {
+	})
 
 	// Match core.setOutput('name', ...) or core.setOutput("name", ...)
 	matches := coreSetOutputPattern.FindAllStringSubmatch(content, -1)
@@ -260,12 +264,13 @@ func extractOutputs(content string) []ActionOutput {
 	for _, match := range matches {
 		if len(match) > 1 {
 			outputName := match[1]
-			if !seen[outputName] {
+			if !setutil.Contains(seen, outputName) {
 				outputs = append(outputs, ActionOutput{
 					Name:        outputName,
 					Description: "Output parameter: " + outputName,
 				})
-				seen[outputName] = true
+				seen[outputName] = struct {
+				}{}
 			}
 		}
 	}
@@ -288,7 +293,8 @@ func extractOutputs(content string) []ActionOutput {
 // extractDependencies extracts require() dependencies
 func extractDependencies(content string) []string {
 	var deps []string
-	seen := make(map[string]bool)
+	seen := make(map[string]struct {
+	})
 
 	// Match require('./filename.cjs') or require("./filename.cjs")
 	matches := requireCJSPattern.FindAllStringSubmatch(content, -1)
@@ -296,9 +302,10 @@ func extractDependencies(content string) []string {
 	for _, match := range matches {
 		if len(match) > 1 {
 			dep := match[1]
-			if !seen[dep] {
+			if !setutil.Contains(seen, dep) {
 				deps = append(deps, dep)
-				seen[dep] = true
+				seen[dep] = struct {
+				}{}
 			}
 		}
 	}

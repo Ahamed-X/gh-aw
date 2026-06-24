@@ -498,9 +498,9 @@ func generateCacheMemorySteps(builder *strings.Builder, data *WorkflowData) {
 		githubConfig = data.ParsedTools.GitHub
 	}
 	integrityLevel := cacheIntegrityLevel(githubConfig)
-
-	for _, cache := range data.CacheMemoryConfig.Caches {
+	for i, cache := range data.CacheMemoryConfig.Caches {
 		cacheDir := cacheMemoryDirFor(cache.ID)
+		restoreStepID := fmt.Sprintf("restore_cache_memory_%d", i)
 
 		// Add step to create cache-memory directory for this cache
 		if useBackwardCompatiblePaths {
@@ -575,6 +575,7 @@ func generateCacheMemorySteps(builder *strings.Builder, data *WorkflowData) {
 		} else {
 			fmt.Fprintf(builder, "      - name: %s (%s)\n", actionName, cache.ID)
 		}
+		fmt.Fprintf(builder, "        id: %s\n", restoreStepID)
 
 		// Use actions/cache/restore@v4 when restore-only or threat detection enabled
 		// Use actions/cache@v4 for normal caches
@@ -599,6 +600,7 @@ func generateCacheMemorySteps(builder *strings.Builder, data *WorkflowData) {
 		// checks out the current integrity branch, and merges down from higher-integrity branches.
 		generateCacheMemoryGitSetupStep(builder, cache, cacheDir, integrityLevel, useBackwardCompatiblePaths)
 	}
+
 }
 
 // generateCacheMemoryGitSetupStep emits a pre-agent step that sets up the git-backed integrity
@@ -859,10 +861,12 @@ func buildCacheMemoryPromptSection(config *CacheMemoryConfig) *PromptSection {
 	if allSame {
 		extsUnion = config.Caches[0].AllowedExtensions
 	} else {
-		extensionSet := make(map[string]bool)
+		extensionSet := make(map[string]struct {
+		})
 		for _, cache := range config.Caches {
 			for _, ext := range cache.AllowedExtensions {
-				extensionSet[ext] = true
+				extensionSet[ext] = struct {
+				}{}
 			}
 		}
 		for ext := range extensionSet {
@@ -1036,6 +1040,8 @@ func (c *Compiler) buildUpdateCacheMemoryJob(data *WorkflowData, threatDetection
 	// Job condition: run only if detection job succeeded (no threats found),
 	// AND the agent job succeeded (do not persist cache when agent failed or was skipped).
 	// Using always() so this condition is evaluated even if an upstream job is skipped/failed.
+	// Detection always runs when the agent ran (even for noop), so detection.result == 'success'
+	// is sufficient — detection short-circuits with success=true when there is nothing to analyze.
 	agentSucceeded := BuildEquals(
 		BuildPropertyAccess(fmt.Sprintf("needs.%s.result", constants.AgentJobName)),
 		BuildStringLiteral("success"),
@@ -1060,7 +1066,7 @@ func (c *Compiler) buildUpdateCacheMemoryJob(data *WorkflowData, threatDetection
 	}
 
 	job := &Job{
-		Name:        "update_cache_memory",
+		Name:        updateCacheMemoryJobName,
 		DisplayName: "", // No display name - job ID is sufficient
 		RunsOn:      c.formatFrameworkJobRunsOn(data),
 		If:          jobCondition,

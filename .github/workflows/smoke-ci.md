@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "🧪"
 name: Smoke CI
 description: Smoke CI workflow that exercises pull request safe outputs through an agent session
@@ -69,7 +70,8 @@ safe-outputs:
   threat-detection: false
 timeout-minutes: 5
 strict: true
-
+features:
+  gh-aw-detection: true
 ---
 
 For all events, call the tools in this exact order:

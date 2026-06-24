@@ -1,4 +1,5 @@
 ---
+private: true
 on:
   schedule:
   - cron: daily
@@ -73,6 +74,8 @@ tools:
     toolsets:
     - default
 tracker-id: daily-doc-healer
+features:
+  gh-aw-detection: true
 ---
 {{#runtime-import? .github/shared-instructions.md}}
 

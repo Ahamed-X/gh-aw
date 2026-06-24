@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "🧪"
 description: Smoke test workflow that validates Crush engine functionality
 on:
@@ -53,7 +54,8 @@ safe-outputs:
       run-success: "🎯 [{workflow_name}]({run_url}) **MISSION COMPLETE!** Crush has delivered. ⚡"
       run-failure: "⚠️ [{workflow_name}]({run_url}) {status}. Crush encountered unexpected challenges..."
 timeout-minutes: 15
-
+features:
+  gh-aw-detection: true
 ---
 
 # Smoke Test: Crush Engine Validation

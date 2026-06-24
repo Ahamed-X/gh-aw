@@ -3,6 +3,7 @@ package workflow
 import (
 	"github.com/github/gh-aw/pkg/constants"
 	"github.com/github/gh-aw/pkg/logger"
+	"github.com/github/gh-aw/pkg/setutil"
 	"github.com/github/gh-aw/pkg/sliceutil"
 )
 
@@ -10,10 +11,10 @@ var botAliasesLog = logger.New("workflow:bot_aliases")
 
 // copilotBotSet is a fast-lookup set built from constants.CopilotBotNames.
 // Any entry in this set triggers expansion to the full CopilotBotNames list.
-var copilotBotSet = func() map[string]bool {
-	set := make(map[string]bool, len(constants.CopilotBotNames))
+var copilotBotSet = func() map[string]struct{} {
+	set := make(map[string]struct{}, len(constants.CopilotBotNames))
 	for _, name := range constants.CopilotBotNames {
-		set[name] = true
+		set[name] = struct{}{}
 	}
 	return set
 }()
@@ -33,7 +34,7 @@ func expandBotNames(bots []string) []string {
 	}
 	needsExpansion := false
 	for _, b := range bots {
-		if copilotBotSet[b] {
+		if setutil.Contains(copilotBotSet, b) {
 			needsExpansion = true
 			break
 		}
@@ -45,7 +46,7 @@ func expandBotNames(bots []string) []string {
 	// identifier that expands to len(constants.CopilotBotNames) entries.
 	expanded := make([]string, 0, len(bots)*len(constants.CopilotBotNames))
 	for _, b := range bots {
-		if copilotBotSet[b] {
+		if setutil.Contains(copilotBotSet, b) {
 			expanded = append(expanded, constants.CopilotBotNames...)
 		} else {
 			expanded = append(expanded, b)

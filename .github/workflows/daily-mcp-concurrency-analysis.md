@@ -1,4 +1,5 @@
 ---
+private: true
 on:
   schedule:
   - cron: daily around 9:00 on weekdays
@@ -61,6 +62,8 @@ tools:
     toolsets:
     - default
 tracker-id: mcp-concurrency-analysis
+features:
+  gh-aw-detection: true
 ---
 
 {{#runtime-import? .github/shared-instructions.md}}

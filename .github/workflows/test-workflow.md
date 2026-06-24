@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "🧪"
 name: Test Workflow
 on:
@@ -14,6 +15,8 @@ permissions:
 
 imports:
   - shared/otlp.md
+features:
+  gh-aw-detection: true
 ---
 
 # Instructions for Test Workflow

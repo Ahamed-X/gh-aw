@@ -12,6 +12,7 @@ import (
 	"github.com/github/gh-aw/pkg/console"
 	"github.com/github/gh-aw/pkg/constants"
 	"github.com/github/gh-aw/pkg/logger"
+	"github.com/github/gh-aw/pkg/setutil"
 )
 
 var compilerMainJobLog = logger.New("workflow:compiler_main_job")
@@ -182,15 +183,17 @@ func (c *Compiler) buildMainJob(data *WorkflowData, activationJobCreated bool) (
 			builtinNames = append(builtinNames, name)
 		}
 		sort.Strings(builtinNames)
-		builtinsWarned := make(map[string]bool)
+		builtinsWarned := make(map[string]struct {
+		})
 		for _, builtinJobName := range builtinNames {
 			// Skip built-ins that are already direct dependencies (e.g., activation) —
 			// their outputs are accessible and the expression is valid.
 			if slices.Contains(depends, builtinJobName) {
 				continue
 			}
-			if !builtinsWarned[builtinJobName] && strings.Contains(engineEnvContent, fmt.Sprintf("needs.%s.", builtinJobName)) {
-				builtinsWarned[builtinJobName] = true
+			if !setutil.Contains(builtinsWarned, builtinJobName) && strings.Contains(engineEnvContent, fmt.Sprintf("needs.%s.", builtinJobName)) {
+				builtinsWarned[builtinJobName] = struct {
+				}{}
 				warningMsg := fmt.Sprintf(
 					"engine.env references built-in job '%s' in a needs expression. "+
 						"Built-in jobs are managed by the compiler and cannot be added as direct agent dependencies; "+
@@ -261,6 +264,16 @@ func (c *Compiler) buildMainJob(data *WorkflowData, activationJobCreated bool) (
 		compilerMainJobLog.Print("Skipped checkout_pr_success output (workflow lacks contents read access)")
 	}
 
+	// Expose restore step outputs so downstream failure handling can compute whether
+	// any cache-memory restore matched an existing cache entry.
+	if data.CacheMemoryConfig != nil && len(data.CacheMemoryConfig.Caches) > 0 {
+		for i := range data.CacheMemoryConfig.Caches {
+			stepID := fmt.Sprintf("restore_cache_memory_%d", i)
+			outputs[fmt.Sprintf("cache_memory_restore_%d_matched_key", i)] = fmt.Sprintf("${{ steps.%s.outputs.cache-matched-key || '' }}", stepID)
+			outputs[fmt.Sprintf("cache_memory_restore_%d_cache_hit", i)] = fmt.Sprintf("${{ steps.%s.outputs.cache-hit || 'false' }}", stepID)
+		}
+	}
+
 	// Add inference_access_error, mcp_policy_error, agentic_engine_timeout, and
 	// model_not_supported_error outputs for engines that provide an error detection step.
 	// These outputs are written by the host-runner detect-agent-errors step (via the
@@ -291,7 +304,7 @@ func (c *Compiler) buildMainJob(data *WorkflowData, activationJobCreated bool) (
 
 		// Set GH_AW_MCP_LOG_DIR for safe outputs MCP server logging
 		// Store in mcp-logs directory so it's included in mcp-logs artifact
-		env["GH_AW_MCP_LOG_DIR"] = "/tmp/gh-aw/mcp-logs/safeoutputs"
+		env["GH_AW_MCP_LOG_DIR"] = constants.TmpMcpLogsSafeOutputsDir
 
 		// Note: GH_AW_SAFE_OUTPUTS, GH_AW_SAFE_OUTPUTS_CONFIG_PATH, and
 		// GH_AW_SAFE_OUTPUTS_TOOLS_PATH are set via a run step (see generateSetRuntimePathsStep)

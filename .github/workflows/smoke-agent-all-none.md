@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "🧪"
 description: "Guard policy smoke test: repos=all, min-integrity=none (most permissive)"
 on:
@@ -40,6 +41,8 @@ safe-outputs:
 timeout-minutes: 10
 imports:
   - shared/otlp.md
+features:
+  gh-aw-detection: true
 ---
 
 # Guard Policy Smoke Test: all/none (most permissive)

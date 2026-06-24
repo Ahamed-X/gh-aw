@@ -13,14 +13,17 @@ const { buildCopilotSDKEnv, isCopilotSDKEnabled } = require("./process_runner.cj
 const {
   appendSafeOutputLine,
   buildMissingToolPermissionIssuePayload,
+  classifyCopilotFailure,
   buildMissingToolAlternatives,
   buildInfrastructureIncompletePayload,
   buildCopilotProxyAuthFailureDiagnostic,
+  envFlagEnabled,
   buildPromptFileFallbackInstruction,
   countPermissionDeniedIssues,
   detectCopilotErrors,
   emitInfrastructureIncomplete,
   emitMissingToolPermissionIssue,
+  extractOutputTail,
   extractDeniedCommands,
   hasNumerousPermissionDeniedIssues,
   hasNoopInSafeOutputs,
@@ -28,6 +31,7 @@ const {
   AGENTIC_ENGINE_TIMEOUT_PATTERN,
   isDetectionPhase,
   isAuthenticationFailedError,
+  isMCPGatewayShutdownError,
   isModelAvailableInReflectData,
   isModelAvailableInReflectFile,
   resolveCopilotSDKCustomProviderFromReflect,
@@ -37,6 +41,8 @@ const {
   fetchModelsFromUrl,
   generateCopilotConnectionToken,
   GEMINI_MODEL_NAME_PREFIX,
+  isCAPIQuotaExceededError,
+  isSDKSessionIdleTimeoutError,
   PROMPT_FILE_INLINE_THRESHOLD_BYTES,
   resolvePromptFileArgs,
   writeCopilotOutputs,
@@ -50,6 +56,50 @@ function makeHarnessTempDir(name) {
   return fs.mkdtempSync(path.join(agentTempDir, name));
 }
 
+function withTestPromptsDir(promptsDir, callback) {
+  const originalPromptsDir = process.env.GH_AW_PROMPTS_DIR;
+  if (typeof promptsDir === "string") {
+    process.env.GH_AW_PROMPTS_DIR = promptsDir;
+  } else {
+    delete process.env.GH_AW_PROMPTS_DIR;
+  }
+  try {
+    return callback();
+  } finally {
+    if (typeof originalPromptsDir === "string") {
+      process.env.GH_AW_PROMPTS_DIR = originalPromptsDir;
+    } else {
+      delete process.env.GH_AW_PROMPTS_DIR;
+    }
+  }
+}
+
+function withRunnerTemp(runnerTempDir, callback) {
+  const originalRunnerTemp = process.env.RUNNER_TEMP;
+  process.env.RUNNER_TEMP = runnerTempDir;
+  try {
+    return callback();
+  } finally {
+    if (typeof originalRunnerTemp === "string") {
+      process.env.RUNNER_TEMP = originalRunnerTemp;
+    } else {
+      delete process.env.RUNNER_TEMP;
+    }
+  }
+}
+
+function withTemporaryPromptTemplate(prefix, sourceTemplateDir, promptDirResolver, callback) {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  try {
+    const promptsDir = promptDirResolver(tempDir);
+    fs.mkdirSync(promptsDir, { recursive: true });
+    fs.copyFileSync(path.join(sourceTemplateDir, "copilot_requests_proxy_auth_403.md"), path.join(promptsDir, "copilot_requests_proxy_auth_403.md"));
+    return callback(tempDir, promptsDir);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
 describe("copilot_harness.cjs", () => {
   // Test the core logic patterns used by the driver without importing the module
   // (importing the module would invoke main() which calls process.exit).
@@ -60,6 +110,36 @@ describe("copilot_harness.cjs", () => {
     it("matches the exact error from the failed workflow run", () => {
       const errorOutput = "Execution failed: CAPIError: 400 400 Bad Request\n (Request ID: C818:3ED713:19D401B:1C446B7:69D653CA)";
       expect(CAPI_ERROR_400_PATTERN.test(errorOutput)).toBe(true);
+    });
+
+    describe("CAPI quota-exceeded detection pattern", () => {
+      it("matches the observed CAPIError 429 quota exceeded error", () => {
+        expect(isCAPIQuotaExceededError("CAPIError: 429 429 quota exceeded")).toBe(true);
+      });
+
+      it("matches the observed error when embedded in Copilot CLI output", () => {
+        const output = "Failed to get response from the AI model; retried 5 times " + "(Request-ID ABC123) Last error: CAPIError: 429 429 quota exceeded";
+        expect(isCAPIQuotaExceededError(output)).toBe(true);
+      });
+
+      it("matches the observed error with extra spacing", () => {
+        expect(isCAPIQuotaExceededError("CAPIError: 429   429   quota exceeded")).toBe(true);
+      });
+
+      it("does not match CAPIError 400", () => {
+        expect(isCAPIQuotaExceededError("CAPIError: 400 Bad Request")).toBe(false);
+      });
+
+      it("matches Copilot/CAPI 429 Too Many Requests output", () => {
+        expect(isCAPIQuotaExceededError("CAPIError: 429 Too Many Requests")).toBe(true);
+        expect(isCAPIQuotaExceededError("Last error: CAPIError: Too Many Requests")).toBe(true);
+      });
+
+      it("does not match unrelated errors", () => {
+        expect(isCAPIQuotaExceededError("Error: connection reset by peer")).toBe(false);
+        expect(isCAPIQuotaExceededError("Authentication failed")).toBe(false);
+        expect(isCAPIQuotaExceededError("")).toBe(false);
+      });
     });
 
     it("matches CAPIError: 400 with various spacing", () => {
@@ -114,6 +194,7 @@ describe("copilot_harness.cjs", () => {
     function shouldRetry(result, attempt) {
       if (result.exitCode === 0) return false;
       if (hasNumerousPermissionDeniedIssues(result.output)) return false;
+      if (isCAPIQuotaExceededError(result.output)) return false;
       return attempt < MAX_RETRIES && result.hasOutput;
     }
 
@@ -157,6 +238,36 @@ describe("copilot_harness.cjs", () => {
       expect(hasNumerousPermissionDeniedIssues(result.output)).toBe(true);
       expect(shouldRetry(result, 0)).toBe(false);
     });
+
+    it("does not retry the observed CAPIError 429 quota exceeded error even when session produced output", () => {
+      const result = {
+        exitCode: 1,
+        hasOutput: true,
+        output: "Failed to get response from the AI model; retried 5 times. Last error: CAPIError: 429 429 quota exceeded",
+      };
+
+      expect(shouldRetry(result, 0)).toBe(false);
+    });
+
+    it("does not retry Copilot/CAPI Too Many Requests output", () => {
+      const result = {
+        exitCode: 1,
+        hasOutput: true,
+        output: "Failed to get response from the AI model; retried 5 times. Last error: CAPIError: Too Many Requests",
+      };
+
+      expect(shouldRetry(result, 0)).toBe(false);
+    });
+
+    it("still retries generic partial-execution errors with output", () => {
+      const result = {
+        exitCode: 1,
+        hasOutput: true,
+        output: "Error: connection reset by peer",
+      };
+
+      expect(shouldRetry(result, 0)).toBe(true);
+    });
   });
 
   describe("scheduled startup retry policy (exit code 2)", () => {
@@ -186,6 +297,79 @@ describe("copilot_harness.cjs", () => {
       const result = { exitCode: 2, hasOutput: false };
       expect(shouldRetry(result, 0, true, 0)).toBe(true);
       expect(shouldRetry(result, 1, true, 1)).toBe(false);
+    });
+
+    describe("failure classification helpers", () => {
+      it("classifies Copilot SDK session.idle timeouts distinctly", () => {
+        const output = "[copilot-sdk-driver] Timeout after 60000ms waiting for session.idle";
+        expect(isSDKSessionIdleTimeoutError(output)).toBe(true);
+        expect(classifyCopilotFailure({ hasOutput: true, isSDKSessionIdleTimeout: true })).toBe("sdk_session_idle_timeout");
+      });
+
+      it("classifies MCP gateway shutdown distinctly when present in output", () => {
+        const output = 'Response: {"message":"Gateway shutdown initiated","serversTerminated":2,"status":"closed"}';
+        expect(isMCPGatewayShutdownError(output)).toBe(true);
+        expect(classifyCopilotFailure({ hasOutput: true, isMCPGatewayShutdown: true })).toBe("mcp_gateway_shutdown");
+      });
+
+      it("sdk_session_idle_timeout outranks permission_denied in failure classification", () => {
+        // Both flags set — the more specific signal must win.
+        expect(classifyCopilotFailure({ hasOutput: true, isSDKSessionIdleTimeout: true, hasNumerousPermissionDenied: true })).toBe("sdk_session_idle_timeout");
+      });
+
+      it("mcp_gateway_shutdown outranks permission_denied in failure classification", () => {
+        // Both flags set — the more specific signal must win.
+        expect(classifyCopilotFailure({ hasOutput: true, isMCPGatewayShutdown: true, hasNumerousPermissionDenied: true })).toBe("mcp_gateway_shutdown");
+      });
+
+      it("retries sdk_session_idle_timeout as partial execution (shouldRetry)", () => {
+        // sdk_session_idle_timeout is not a quota/permission blocker; the harness should retry.
+        const result = {
+          exitCode: 1,
+          hasOutput: true,
+          output: "[copilot-sdk-driver] Timeout after 60000ms waiting for session.idle",
+        };
+        const MAX_RETRIES = 3;
+        const shouldRetryLocal = (r, attempt) => {
+          if (r.exitCode === 0) return false;
+          if (hasNumerousPermissionDeniedIssues(r.output)) return false;
+          if (isCAPIQuotaExceededError(r.output)) return false;
+          return attempt < MAX_RETRIES && r.hasOutput;
+        };
+        expect(shouldRetryLocal(result, 0)).toBe(true);
+      });
+
+      it("retries mcp_gateway_shutdown as partial execution (shouldRetry)", () => {
+        // mcp_gateway_shutdown is not a quota/permission blocker; the harness should retry.
+        const result = {
+          exitCode: 1,
+          hasOutput: true,
+          output: '{"message":"Gateway shutdown initiated","serversTerminated":1,"status":"closed"}',
+        };
+        const MAX_RETRIES = 3;
+        const shouldRetryLocal = (r, attempt) => {
+          if (r.exitCode === 0) return false;
+          if (hasNumerousPermissionDeniedIssues(r.output)) return false;
+          if (isCAPIQuotaExceededError(r.output)) return false;
+          return attempt < MAX_RETRIES && r.hasOutput;
+        };
+        expect(shouldRetryLocal(result, 0)).toBe(true);
+      });
+
+      it("extractOutputTail never exceeds maxChars even when maxChars is 1", () => {
+        const tail = extractOutputTail("abc", { maxLines: 5, maxChars: 1 });
+        expect(tail.length).toBeLessThanOrEqual(1);
+      });
+
+      it("extracts a compact tail preview from large output", () => {
+        const tail = extractOutputTail(["line 1", "line 2", "line 3", "line 4"].join("\n"), { maxLines: 2, maxChars: 20 });
+        expect(tail).toBe("line 3\nline 4");
+      });
+
+      it("truncates very large output tails from the front", () => {
+        const tail = extractOutputTail(`prefix\n${"x".repeat(40)}`, { maxLines: 5, maxChars: 16 });
+        expect(tail).toBe(`…${"x".repeat(15)}`);
+      });
     });
 
     it("does not claim a retry when already at max retry attempt", () => {
@@ -819,6 +1003,8 @@ describe("copilot_harness.cjs", () => {
   });
 
   describe("gh-aw API proxy auth diagnostics", () => {
+    const promptsSourceDir = path.resolve("../md");
+
     it("rewrites local proxy 401 errors to COPILOT_GITHUB_TOKEN guidance", () => {
       const diagnostic = buildCopilotProxyAuthFailureDiagnostic("Authentication failed with provider at http://172.30.0.30:10002 (HTTP 401).\nCheck your COPILOT_PROVIDER_API_KEY or COPILOT_PROVIDER_BEARER_TOKEN.", {
         COPILOT_MODEL: "claude-sonnet-4.5",
@@ -831,6 +1017,116 @@ describe("copilot_harness.cjs", () => {
       expect(diagnostic).toContain("COPILOT_GITHUB_TOKEN");
       expect(diagnostic).toContain("GH_AW_MODEL_AGENT_COPILOT");
       expect(diagnostic).not.toContain("COPILOT_PROVIDER_API_KEY");
+    });
+
+    it("rewrites local proxy 403 errors in copilot-requests mode to org-billing guidance", () => {
+      withTestPromptsDir(promptsSourceDir, () => {
+        const diagnostic = buildCopilotProxyAuthFailureDiagnostic("Authentication failed with provider at http://172.30.0.30:10002 (HTTP 403).\nCheck your COPILOT_PROVIDER_API_KEY or COPILOT_PROVIDER_BEARER_TOKEN.", {
+          COPILOT_MODEL: "claude-sonnet-4.5",
+          S2STOKENS: "true",
+        });
+
+        expect(diagnostic).toContain("Copilot requests authentication failed");
+        expect(diagnostic).toContain("HTTP 403");
+        expect(diagnostic).toContain("model=claude-sonnet-4.5");
+        expect(diagnostic).toContain("stage=starting the Copilot CLI request");
+        expect(diagnostic).toContain("permissions.copilot-requests: write");
+        expect(diagnostic).toContain("centralized Copilot billing");
+        expect(diagnostic).toContain("https://github.github.com/gh-aw/reference/billing/");
+        expect(diagnostic).not.toContain("COPILOT_PROVIDER_API_KEY");
+      });
+    });
+
+    it("treats truthy S2STOKENS values as copilot-requests mode for 403 guidance", () => {
+      withTestPromptsDir(promptsSourceDir, () => {
+        const diagnostic = buildCopilotProxyAuthFailureDiagnostic("Authentication failed with provider at http://172.30.0.30:10002 (HTTP 403).", {
+          COPILOT_MODEL: "claude-sonnet-4.5",
+          S2STOKENS: " YES ",
+        });
+
+        expect(diagnostic).toContain("Copilot requests authentication failed");
+        expect(diagnostic).toContain("https://github.github.com/gh-aw/reference/billing/");
+        expect(diagnostic).not.toContain("COPILOT_PROVIDER_API_KEY");
+      });
+    });
+
+    it("resolves the 403 guidance template from the runtime prompts directory", () => {
+      withTemporaryPromptTemplate(
+        "runtime-prompts-",
+        promptsSourceDir,
+        tempDir => tempDir,
+        (_tempDir, runtimePromptsDir) => {
+          withTestPromptsDir(runtimePromptsDir, () => {
+            const renderTemplateFromFile = vi.fn((templatePath, context) => {
+              return fs.readFileSync(templatePath, "utf8").replace("{selected_model}", context.selected_model).replace("{stage}", context.stage);
+            });
+            const diagnostic = buildCopilotProxyAuthFailureDiagnostic(
+              "Authentication failed with provider at http://172.30.0.30:10002 (HTTP 403).",
+              {
+                COPILOT_MODEL: "claude-sonnet-4.5",
+                S2STOKENS: "true",
+              },
+              { renderTemplateFromFile }
+            );
+
+            expect(diagnostic).toContain("Copilot requests authentication failed");
+            expect(diagnostic).toContain("model=claude-sonnet-4.5");
+            expect(diagnostic).toContain("stage=starting the Copilot CLI request");
+            expect(renderTemplateFromFile).toHaveBeenCalledWith(path.join(runtimePromptsDir, "copilot_requests_proxy_auth_403.md"), {
+              selected_model: "claude-sonnet-4.5",
+              stage: "starting the Copilot CLI request",
+            });
+          });
+        }
+      );
+    });
+
+    it("resolves the 403 guidance template from RUNNER_TEMP when GH_AW_PROMPTS_DIR is unset", () => {
+      withTemporaryPromptTemplate(
+        "runner-temp-",
+        promptsSourceDir,
+        tempDir => path.join(tempDir, "gh-aw", "prompts"),
+        runnerTempDir => {
+          withTestPromptsDir(undefined, () => {
+            withRunnerTemp(runnerTempDir, () => {
+              const diagnostic = buildCopilotProxyAuthFailureDiagnostic("Authentication failed with provider at http://172.30.0.30:10002 (HTTP 403).", {
+                COPILOT_MODEL: "claude-sonnet-4.5",
+                S2STOKENS: "true",
+              });
+
+              expect(diagnostic).toContain("Copilot requests authentication failed");
+              expect(diagnostic).toContain("model=claude-sonnet-4.5");
+              expect(diagnostic).toContain("stage=starting the Copilot CLI request");
+            });
+          });
+        }
+      );
+    });
+
+    it("returns empty string for proxy 403 when S2STOKENS is not set (BYOK mode)", () => {
+      const diagnostic = buildCopilotProxyAuthFailureDiagnostic("Authentication failed with provider at http://172.30.0.30:10002 (HTTP 403).", {
+        COPILOT_MODEL: "claude-sonnet-4.5",
+      });
+
+      expect(diagnostic).toBe("");
+    });
+
+    it("returns empty string for proxy 403 when S2STOKENS is falsy", () => {
+      const diagnostic = buildCopilotProxyAuthFailureDiagnostic("Authentication failed with provider at http://172.30.0.30:10002 (HTTP 403).", {
+        COPILOT_MODEL: "claude-sonnet-4.5",
+        S2STOKENS: "false",
+      });
+
+      expect(diagnostic).toBe("");
+    });
+
+    it("returns empty string for non-proxy 403 even when S2STOKENS is true", () => {
+      const diagnostic = buildCopilotProxyAuthFailureDiagnostic("Authentication failed with provider at (api.anthropic.com/redacted) (HTTP 403).", {
+        COPILOT_MODEL: "claude-sonnet-4.5",
+        S2STOKENS: "true",
+      });
+
+      expect(diagnostic).toBe("");
     });
 
     it("reports token-validation stage when present in the output", () => {
@@ -855,6 +1151,20 @@ describe("copilot_harness.cjs", () => {
       const diagnostic = buildCopilotProxyAuthFailureDiagnostic("Authentication failed with provider at http://host.docker.internal:11434/v1 (HTTP 401).", { COPILOT_MODEL: "qwen2.5:0.5b" });
 
       expect(diagnostic).toBe("");
+    });
+  });
+
+  describe("envFlagEnabled", () => {
+    it.each(["true", "TRUE", "True", "1", "yes", " YES "])("returns true for '%s'", v => {
+      expect(envFlagEnabled(v)).toBe(true);
+    });
+
+    it.each(["false", "FALSE", "0", "no", "", "  "])("returns false for '%s'", v => {
+      expect(envFlagEnabled(v)).toBe(false);
+    });
+
+    it("returns false for undefined", () => {
+      expect(envFlagEnabled(undefined)).toBe(false);
     });
   });
 

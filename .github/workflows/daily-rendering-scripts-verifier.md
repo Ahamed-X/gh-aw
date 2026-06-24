@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "✅"
 name: Daily Rendering Scripts Verifier
 description: Daily verification that the engine-specific log parser and rendering scripts correctly handle real agentic workflow output files
@@ -56,6 +57,8 @@ imports:
       expires: 3d
 
   - shared/otlp.md
+features:
+  gh-aw-detection: true
 ---
 
 # Daily Rendering Scripts Verifier

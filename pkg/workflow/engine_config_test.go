@@ -78,6 +78,14 @@ func TestExtractEngineConfig(t *testing.T) {
 			expectedConfig:        &EngineConfig{MaxToolDenials: "${{ inputs.max-tool-denials }}"},
 		},
 		{
+			name: "top-level max-turn-cache-misses without engine",
+			frontmatter: map[string]any{
+				"max-turn-cache-misses": 6,
+			},
+			expectedEngineSetting: "",
+			expectedConfig:        &EngineConfig{MaxTurnCacheMisses: 6},
+		},
+		{
 			name: "top-level max-turns zero is ignored",
 			frontmatter: map[string]any{
 				"max-turns": 0,
@@ -169,6 +177,28 @@ func TestExtractEngineConfig(t *testing.T) {
 			},
 			expectedEngineSetting: "codex",
 			expectedConfig:        &EngineConfig{ID: "codex", Model: "gpt-4o"},
+		},
+		{
+			name: "object format - with model-provider override",
+			frontmatter: map[string]any{
+				"engine": map[string]any{
+					"id":             "claude",
+					"model-provider": "github",
+				},
+			},
+			expectedEngineSetting: "claude",
+			expectedConfig:        &EngineConfig{ID: "claude", LLMProvider: "github"},
+		},
+		{
+			name: "object format - deprecated llm-provider ignored",
+			frontmatter: map[string]any{
+				"engine": map[string]any{
+					"id":           "claude",
+					"llm-provider": "github",
+				},
+			},
+			expectedEngineSetting: "claude",
+			expectedConfig:        &EngineConfig{ID: "claude"},
 		},
 		{
 			name: "object format - complete",
@@ -290,6 +320,23 @@ func TestExtractEngineConfig(t *testing.T) {
 			expectedConfig:        &EngineConfig{ID: "claude", Env: map[string]string{"CUSTOM_VAR": "value1", "ANOTHER_VAR": "${{ secrets.SECRET_VAR }}"}},
 		},
 		{
+			name: "object format - with non-string scalar env vars",
+			frontmatter: map[string]any{
+				"engine": map[string]any{
+					"id": "claude",
+					"env": map[string]any{
+						"STRING_VAR":      "value1",
+						"INT_VAR":         1,
+						"FLOAT_VAR":       float64(1000),
+						"LARGE_FLOAT_VAR": float64(1000000),
+						"BOOL_VAR":        true,
+					},
+				},
+			},
+			expectedEngineSetting: "claude",
+			expectedConfig:        &EngineConfig{ID: "claude", Env: map[string]string{"STRING_VAR": "value1", "INT_VAR": "1", "FLOAT_VAR": "1000", "LARGE_FLOAT_VAR": "1000000", "BOOL_VAR": "true"}},
+		},
+		{
 			name: "object format - complete with env vars",
 			frontmatter: map[string]any{
 				"engine": map[string]any{
@@ -348,7 +395,7 @@ func TestExtractEngineConfig(t *testing.T) {
 				},
 			},
 			expectedEngineSetting: "copilot",
-			expectedConfig:        &EngineConfig{ID: "copilot", CopilotSDK: true, CopilotSDKDriver: "custom_copilot_sdk_driver.cjs"},
+			expectedConfig:        &EngineConfig{ID: "copilot", CopilotSDK: true, Driver: "custom_copilot_sdk_driver.cjs"},
 		},
 		{
 			name: "object format - copilot sdk driver implies copilot sdk even when false",
@@ -360,7 +407,7 @@ func TestExtractEngineConfig(t *testing.T) {
 				},
 			},
 			expectedEngineSetting: "copilot",
-			expectedConfig:        &EngineConfig{ID: "copilot", CopilotSDK: true, CopilotSDKDriver: "custom_copilot_sdk_driver.cjs"},
+			expectedConfig:        &EngineConfig{ID: "copilot", CopilotSDK: true, Driver: "custom_copilot_sdk_driver.cjs"},
 		},
 		{
 			name: "object format - complete with user-agent",
@@ -430,8 +477,8 @@ func TestExtractEngineConfig(t *testing.T) {
 					t.Errorf("Expected config.HarnessScript '%s', got '%s'", test.expectedConfig.HarnessScript, config.HarnessScript)
 				}
 
-				if config.CopilotSDKDriver != test.expectedConfig.CopilotSDKDriver {
-					t.Errorf("Expected config.CopilotSDKDriver '%s', got '%s'", test.expectedConfig.CopilotSDKDriver, config.CopilotSDKDriver)
+				if config.Driver != test.expectedConfig.Driver {
+					t.Errorf("Expected config.Driver '%s', got '%s'", test.expectedConfig.Driver, config.Driver)
 				}
 
 				if config.CopilotSDK != test.expectedConfig.CopilotSDK {

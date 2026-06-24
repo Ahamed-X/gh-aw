@@ -98,6 +98,48 @@ function auditLog(serverName, entry) {
 }
 
 // ---------------------------------------------------------------------------
+// I/O helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Write data to process.stdout and return a Promise that resolves only after
+ * the data has been fully flushed to the OS.
+ *
+ * When stdout is a pipe and the payload exceeds the OS pipe buffer (~64 KiB on
+ * Linux), `process.stdout.write()` returns `false` — the first chunk is written
+ * to the OS immediately but the remainder is queued in Node.js's internal
+ * buffer.  Any synchronous write to process.stderr that follows (e.g. a
+ * `core.info` call) will reach the OS *before* the buffered stdout tail is
+ * flushed, which corrupts the output when the caller captures both streams
+ * together (e.g. `2>&1`).
+ *
+ * Awaiting the `drain` event ensures stdout is fully drained before any
+ * subsequent diagnostic logging.
+ *
+ * @param {string} data
+ * @returns {Promise<void>}
+ */
+function writeStdoutAndFlush(data) {
+  return new Promise((resolve, reject) => {
+    const flushed = process.stdout.write(data);
+    if (flushed) {
+      resolve();
+    } else {
+      const onDrain = () => {
+        process.stdout.removeListener("error", onError);
+        resolve();
+      };
+      const onError = err => {
+        process.stdout.removeListener("drain", onDrain);
+        reject(err);
+      };
+      process.stdout.once("drain", onDrain);
+      process.stdout.once("error", onError);
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
 // HTTP helpers
 // ---------------------------------------------------------------------------
 
@@ -439,13 +481,16 @@ function parseBridgeArgs(argv) {
 }
 
 /**
- * Check whether stdin should be read and parsed as a JSON payload for tool arguments.
- * Returns true when the '.' sentinel is the only argument, or when no arguments are
- * provided and stdin is not connected to a terminal (i.e. data is being piped).
+ * Check whether stdin should be read for tool arguments.
+ * Returns true when:
+ * - The '.' sentinel is the only argument (JSON payload mode — full args from stdin), or
+ * - No arguments are provided and stdin is not connected to a terminal (piped JSON payload), or
+ * - Any '--key .' or '--key=.' pair is present (per-field stdin mode — raw text for that field).
  *
- * This enables agents to pipe complex multi-argument payloads as a single JSON object:
+ * This enables agents to pipe content in multiple ways:
  *   printf '{"issue_number":42,"body":"hello"}' | safeoutputs add_comment .
  *   printf '{"issue_number":42,"body":"hello"}' | safeoutputs add_comment
+ *   printf 'Long issue body...' | safeoutputs create_issue --title "Bug" --body .
  *
  * @param {string[]} args - User arguments after the tool name
  * @returns {boolean}
@@ -453,6 +498,15 @@ function parseBridgeArgs(argv) {
 function hasStdinJsonPayload(args) {
   if (args.length === 1 && args[0] === ".") return true;
   if (args.length === 0 && !process.stdin.isTTY) return true;
+  // Per-field stdin marker: --key . (space-separated) or --key=. (equals-separated)
+  for (let i = 0; i < args.length; i++) {
+    if (args[i].startsWith("--")) {
+      const raw = args[i].slice(2);
+      const eqIdx = raw.indexOf("=");
+      if (eqIdx >= 0 && raw.slice(eqIdx + 1) === ".") return true;
+      if (eqIdx < 0 && i + 1 < args.length && args[i + 1] === ".") return true;
+    }
+  }
   return false;
 }
 
@@ -509,10 +563,16 @@ function readStdinSync() {
  * complex multi-argument payloads without shell quoting issues:
  *   printf '{"issue_number":42,"body":"hello"}' | safeoutputs add_comment .
  *
+ * When `stdinContent` is provided and non-empty, any '--key .' or '--key=.'
+ * pair substitutes that field's value with the raw stdin text (per-field
+ * stdin mode). This enables agents to pipe large text into a single field:
+ *   printf 'Long issue body...' | safeoutputs create_issue --title "Bug" --body .
+ * When stdin is empty, the '.' is passed through as a literal value.
+ *
  * @param {string[]} args - User arguments after the tool name
  * @param {Record<string, {type?: string|string[]}>} [schemaProperties] - Tool input schema properties
- * @param {string | null} [stdinContent] - Pre-read stdin content; used only when args is empty
- *   or `['.']` (JSON payload mode). Ignored for all other argument forms.
+ * @param {string | null} [stdinContent] - Pre-read stdin content; used in JSON payload mode
+ *   (args empty or `['.']`) and per-field stdin mode (`--key .`).
  * @returns {{args: Record<string, unknown>, json: boolean}}
  */
 function parseToolArgs(args, schemaProperties = {}, stdinContent = null) {
@@ -521,14 +581,15 @@ function parseToolArgs(args, schemaProperties = {}, stdinContent = null) {
   let jsonOutput = false;
   const hasSchemaProperties = Object.keys(schemaProperties).length > 0;
   const { normalizedSchemaKeyMap, ambiguousNormalizedSchemaKeys } = buildNormalizedSchemaKeyMap(schemaProperties);
+  // Trimmed stdin content used in both JSON payload mode and per-field stdin mode.
+  const trimmedStdin = stdinContent !== null ? stdinContent.trim() : null;
 
   // JSON payload mode: when args is empty or ['.'] and stdinContent is available,
   // parse stdin as a JSON object and use its properties directly as tool arguments.
-  if (stdinContent !== null && (args.length === 0 || (args.length === 1 && args[0] === "."))) {
-    const trimmed = stdinContent.trim();
-    if (trimmed) {
+  if (trimmedStdin !== null && (args.length === 0 || (args.length === 1 && args[0] === "."))) {
+    if (trimmedStdin) {
       try {
-        const parsed = JSON.parse(trimmed);
+        const parsed = JSON.parse(trimmedStdin);
         if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
           for (const [key, value] of Object.entries(parsed)) {
             const canonicalKey = resolveSchemaPropertyKey(key, schemaProperties, normalizedSchemaKeyMap, ambiguousNormalizedSchemaKeys);
@@ -554,14 +615,22 @@ function parseToolArgs(args, schemaProperties = {}, stdinContent = null) {
         } else {
           const canonicalKey = resolveSchemaPropertyKey(key, schemaProperties, normalizedSchemaKeyMap, ambiguousNormalizedSchemaKeys);
           const rawValue = raw.slice(eqIdx + 1);
-          result[canonicalKey] = coerceToolArgValue(canonicalKey, rawValue, schemaProperties[canonicalKey], result[canonicalKey], !hasSchemaProperties);
+          if (rawValue === "." && trimmedStdin) {
+            result[canonicalKey] = trimmedStdin;
+          } else {
+            result[canonicalKey] = coerceToolArgValue(canonicalKey, rawValue, schemaProperties[canonicalKey], result[canonicalKey], !hasSchemaProperties);
+          }
         }
       } else if (raw === "json") {
         jsonOutput = true;
       } else if (i + 1 < args.length && !args[i + 1].startsWith("--")) {
         const canonicalKey = resolveSchemaPropertyKey(raw, schemaProperties, normalizedSchemaKeyMap, ambiguousNormalizedSchemaKeys);
         const rawValue = args[i + 1];
-        result[canonicalKey] = coerceToolArgValue(canonicalKey, rawValue, schemaProperties[canonicalKey], result[canonicalKey], !hasSchemaProperties);
+        if (rawValue === "." && trimmedStdin) {
+          result[canonicalKey] = trimmedStdin;
+        } else {
+          result[canonicalKey] = coerceToolArgValue(canonicalKey, rawValue, schemaProperties[canonicalKey], result[canonicalKey], !hasSchemaProperties);
+        }
         i++;
       } else {
         const canonicalKey = resolveSchemaPropertyKey(raw, schemaProperties, normalizedSchemaKeyMap, ambiguousNormalizedSchemaKeys);
@@ -1014,8 +1083,9 @@ function isResultMessage(message) {
  *
  * @param {unknown} responseBody - Parsed JSON-RPC response body
  * @param {string} serverName - Server name (for logging)
+ * @returns {Promise<void>}
  */
-function formatResponse(responseBody, serverName) {
+async function formatResponse(responseBody, serverName) {
   const core = global.core;
   const messages = extractJSONRPCMessages(responseBody);
   renderProgressMessages(messages);
@@ -1058,7 +1128,7 @@ function formatResponse(responseBody, serverName) {
         auditLog(serverName, { event: "tool_error", error: output });
         process.exitCode = 1;
       } else {
-        process.stdout.write(output + "\n");
+        await writeStdoutAndFlush(output + "\n");
         core.info(`[${serverName}] Tool output: ${output.length} chars`);
       }
       return;
@@ -1071,14 +1141,14 @@ function formatResponse(responseBody, serverName) {
       auditLog(serverName, { event: "tool_error", error: resultStr });
       process.exitCode = 1;
     } else {
-      process.stdout.write(resultStr + "\n");
+      await writeStdoutAndFlush(resultStr + "\n");
     }
     return;
   }
 
   // Fallback: print raw response
   const rawStr = typeof resp === "string" ? resp : JSON.stringify(resp);
-  process.stdout.write(rawStr + "\n");
+  await writeStdoutAndFlush(rawStr + "\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -1149,15 +1219,25 @@ async function main() {
     stopKeepalive = startMcpKeepalivePings(serverUrl, apiKey, sessionId, serverName);
     const resp = await mcpToolsCall(serverUrl, apiKey, sessionId, toolName, toolArgs, serverName);
 
+    // Stop keepalive BEFORE writing any output.  When stdout is a pipe and the
+    // response payload exceeds the OS pipe buffer (~64 KiB on Linux),
+    // process.stdout.write() buffers the overflow and flushes it later via the
+    // event loop.  If the keepalive timer fires in that window its core.info()
+    // call writes to stderr; callers that capture both streams (e.g. 2>&1) see
+    // the [info] line interleaved inside the JSON, corrupting it.  Stopping the
+    // timer here ensures no further log lines reach stderr during the write.
+    stopKeepalive?.();
+    stopKeepalive = null;
+
     const totalMs = Date.now() - callStartMs;
     core.info(`[${serverName}] Tool call complete: total=${totalMs}ms`);
     auditLog(serverName, { event: "call_complete", tool: toolName, totalElapsedMs: totalMs });
 
     if (jsonOutput) {
       // --json: print the raw JSON-RPC response body
-      process.stdout.write(JSON.stringify(resp.body, null, 2) + "\n");
+      await writeStdoutAndFlush(JSON.stringify(resp.body, null, 2) + "\n");
     } else {
-      formatResponse(resp.body, serverName);
+      await formatResponse(resp.body, serverName);
     }
   } catch (err) {
     const totalMs = Date.now() - callStartMs;
@@ -1191,6 +1271,7 @@ module.exports = {
   extractJSONRPCMessages,
   renderProgressMessages,
   formatResponse,
+  writeStdoutAndFlush,
   showHelp,
   showToolHelp,
   hasStdinJsonPayload,

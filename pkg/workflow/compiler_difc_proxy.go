@@ -249,6 +249,9 @@ func (c *Compiler) buildStartDIFCProxyStepYAML(data *WorkflowData) string {
 	sb.WriteString("        env:\n")
 	fmt.Fprintf(&sb, "          GH_TOKEN: %s\n", effectiveToken)
 	sb.WriteString("          GITHUB_SERVER_URL: ${{ github.server_url }}\n")
+	if isAWFNetworkIsolationEnabled(data) {
+		sb.WriteString("          GH_AW_NETWORK_ISOLATION: 'true'\n")
+	}
 	// Store policy and image in env vars to avoid shell-quoting issues with
 	// inline JSON arguments and to keep the run: command clean.
 	fmt.Fprintf(&sb, "          DIFC_PROXY_POLICY: '%s'\n", policyJSON)
@@ -316,7 +319,7 @@ func proxyEnvVars() map[string]string {
 		"GH_REPO":             "${{ github.repository }}",
 		"GITHUB_API_URL":      "https://localhost:18443/api/v3",
 		"GITHUB_GRAPHQL_URL":  "https://localhost:18443/api/graphql",
-		"NODE_EXTRA_CA_CERTS": "/tmp/gh-aw/proxy-logs/proxy-tls/ca.crt",
+		"NODE_EXTRA_CA_CERTS": constants.TmpProxyTLSCACert,
 	}
 }
 
@@ -519,6 +522,9 @@ func (c *Compiler) buildStartCliProxyStepYAML(data *WorkflowData) string {
 	sb.WriteString("        env:\n")
 	fmt.Fprintf(&sb, "          GH_TOKEN: %s\n", effectiveToken)
 	sb.WriteString("          GITHUB_SERVER_URL: ${{ github.server_url }}\n")
+	if isAWFNetworkIsolationEnabled(data) {
+		sb.WriteString("          GH_AW_NETWORK_ISOLATION: 'true'\n")
+	}
 	fmt.Fprintf(&sb, "          CLI_PROXY_POLICY: '%s'\n", policyJSON)
 	fmt.Fprintf(&sb, "          CLI_PROXY_IMAGE: '%s'\n", containerImage)
 	sb.WriteString("        run: |\n")
@@ -558,7 +564,7 @@ func difcProxyLogPaths(data *WorkflowData) []string {
 	// Exclude proxy-tls/ to avoid uploading TLS material (mcp-logs/ is already
 	// collected as part of standard MCP logging).
 	return []string{
-		"/tmp/gh-aw/proxy-logs/",
-		"!/tmp/gh-aw/proxy-logs/proxy-tls/",
+		constants.TmpProxyLogsDir,
+		"!" + constants.TmpProxyTLSDir,
 	}
 }

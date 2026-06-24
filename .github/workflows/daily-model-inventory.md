@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "📦"
 name: Daily Model Inventory Checker
 description: Queries model lists from OpenAI, Anthropic, and Google APIs daily, uses AWF /reflect for Copilot models, then analyzes the combined inventory to propose updates to the builtin model alias mapping
@@ -16,7 +17,7 @@ tracker-id: daily-model-inventory
 engine:
   id: copilot
   copilot-sdk: true
-  copilot-sdk-driver: .github/drivers/copilot_sdk_driver_sample_node.cjs
+  driver: .github/drivers/copilot_sdk_driver_sample_node.cjs
 strict: true
 timeout-minutes: 30
 
@@ -322,6 +323,8 @@ safe-outputs:
 
 imports:
   - shared/otlp.md
+features:
+  gh-aw-detection: true
 ---
 
 # Daily Model Inventory Checker

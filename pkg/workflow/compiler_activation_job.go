@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/goccy/go-yaml"
+
 	"github.com/github/gh-aw/pkg/constants"
 	"github.com/github/gh-aw/pkg/logger"
-	"github.com/goccy/go-yaml"
+	"github.com/github/gh-aw/pkg/setutil"
 )
 
 var compilerActivationJobLog = logger.New("workflow:compiler_activation_job")
@@ -39,6 +41,7 @@ func (c *Compiler) buildActivationJob(data *WorkflowData, preActivationJobCreate
 	if err := c.addActivationCommandAndLabelOutputs(ctx); err != nil {
 		return nil, err
 	}
+	ctx.steps = append(ctx.steps, buildRuntimeFeaturesSummaryStep()...)
 
 	// Generate experiment selection steps when experiments are declared in the frontmatter.
 	// These steps run before the prompt is built so that experiments.name expressions
@@ -136,12 +139,12 @@ func addActivationInteractionPermissionsMap(
 		return
 	}
 
-	hasIssuesEvent := eventSet["issues"]
-	hasIssueCommentEvent := eventSet["issue_comment"]
-	hasPullRequestEvent := eventSet["pull_request"]
-	hasPullRequestReviewCommentEvent := eventSet["pull_request_review_comment"]
-	hasDiscussionEvent := eventSet["discussion"]
-	hasDiscussionCommentEvent := eventSet["discussion_comment"]
+	hasIssuesEvent := setutil.Contains(eventSet, "issues")
+	hasIssueCommentEvent := setutil.Contains(eventSet, "issue_comment")
+	hasPullRequestEvent := setutil.Contains(eventSet, "pull_request")
+	hasPullRequestReviewCommentEvent := setutil.Contains(eventSet, "pull_request_review_comment")
+	hasDiscussionEvent := setutil.Contains(eventSet, "discussion")
+	hasDiscussionCommentEvent := setutil.Contains(eventSet, "discussion_comment")
 
 	if options.hasReaction {
 		// Reactions on issues, issue comments, and pull requests use issues endpoints.
@@ -185,14 +188,16 @@ func addBroadActivationInteractionPermissions(
 	}
 
 	needsIssuesWriteForReaction := options.hasReaction && (options.reactionIncludesIssues || options.reactionIncludesPullRequests)
-	needsIssuesWriteForStatusComment := options.statusCommentIncludesIssues || options.statusCommentIncludesPullRequests
+	needsIssuesWriteForStatusComment := options.hasStatusComment &&
+		(options.statusCommentIncludesIssues || options.statusCommentIncludesPullRequests)
 	if needsIssuesWriteForReaction || needsIssuesWriteForStatusComment {
 		permsMap[PermissionIssues] = PermissionWrite
 	}
 	if options.hasReaction && options.reactionIncludesPullRequests {
 		permsMap[PermissionPullRequests] = PermissionWrite
 	}
-	if (options.hasReaction && options.reactionIncludesDiscussions) || options.statusCommentIncludesDiscussions {
+	if (options.hasReaction && options.reactionIncludesDiscussions) ||
+		(options.hasStatusComment && options.statusCommentIncludesDiscussions) {
 		permsMap[PermissionDiscussions] = PermissionWrite
 	}
 }
@@ -239,8 +244,10 @@ func shouldIncludeDiscussionStatusComments(data *WorkflowData) bool {
 	return *data.StatusCommentDiscussions
 }
 
-func activationEventSet(onSection string) (map[string]bool, bool) {
-	events := make(map[string]bool)
+func activationEventSet(onSection string) (map[string]struct {
+}, bool) {
+	events := make(map[string]struct {
+	})
 	var onData map[string]any
 	if err := yaml.Unmarshal([]byte(onSection), &onData); err != nil {
 		compilerActivationJobLog.Printf("Failed to parse on section for activation permission scoping: %v", err)
@@ -255,11 +262,13 @@ func activationEventSet(onSection string) (map[string]bool, bool) {
 
 	switch v := onValue.(type) {
 	case string:
-		events[v] = true
+		events[v] = struct {
+		}{}
 	case []any:
 		for _, item := range v {
 			if eventName, ok := item.(string); ok {
-				events[eventName] = true
+				events[eventName] = struct {
+				}{}
 			}
 		}
 	case map[string]any:
@@ -267,7 +276,8 @@ func activationEventSet(onSection string) (map[string]bool, bool) {
 			if isActivationMetadataTriggerField(eventName) {
 				continue
 			}
-			events[eventName] = true
+			events[eventName] = struct {
+			}{}
 		}
 	default:
 		compilerActivationJobLog.Printf("Unsupported on section type for activation permission scoping: %T", onValue)
@@ -289,9 +299,11 @@ func isActivationMetadataTriggerField(eventName string) bool {
 func buildCentralizedCommandOnSection(commandEvents []string) string {
 	filteredEvents := FilterCommentEvents(commandEvents)
 	// Map to actual GitHub event names and deduplicate.
-	eventSet := make(map[string]bool)
+	eventSet := make(map[string]struct {
+	})
 	for _, mapping := range filteredEvents {
-		eventSet[GetActualGitHubEventName(mapping.EventName)] = true
+		eventSet[GetActualGitHubEventName(mapping.EventName)] = struct {
+		}{}
 	}
 	if len(eventSet) == 0 {
 		return ""
@@ -299,11 +311,13 @@ func buildCentralizedCommandOnSection(commandEvents []string) string {
 	var b strings.Builder
 	b.WriteString("on:\n")
 	// Derive ordering from GetAllCommentEvents to stay consistent with the rest of the codebase.
-	seen := make(map[string]bool)
+	seen := make(map[string]struct {
+	})
 	for _, mapping := range GetAllCommentEvents() {
 		name := GetActualGitHubEventName(mapping.EventName)
-		if eventSet[name] && !seen[name] {
-			seen[name] = true
+		if setutil.Contains(eventSet, name) && !setutil.Contains(seen, name) {
+			seen[name] = struct {
+			}{}
 			b.WriteString("  " + name + ":\n    types: [created]\n")
 		}
 	}
@@ -404,10 +418,11 @@ func (c *Compiler) generateCheckoutGitHubFolderForActivation(data *WorkflowData)
 	// .github and .agents are already included in GenerateGitHubFolderCheckoutStep's hardcoded list.
 	// Root instruction files (AGENTS.md, CLAUDE.md, GEMINI.md) are excluded — they are not needed
 	// during activation and are omitted to keep the shallow checkout minimal.
-	defaultSparseCheckoutDirs := map[string]bool{".github": true, ".agents": true}
+	defaultSparseCheckoutDirs := map[string]struct {
+	}{".github": {}, ".agents": {}}
 	registry := GetGlobalEngineRegistry()
 	for _, folder := range registry.GetAllAgentManifestFolders() {
-		if !defaultSparseCheckoutDirs[folder] {
+		if !setutil.Contains(defaultSparseCheckoutDirs, folder) {
 			extraPaths = append(extraPaths, folder)
 		}
 	}

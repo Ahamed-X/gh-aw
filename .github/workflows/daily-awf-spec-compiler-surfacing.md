@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "🧭"
 name: Daily AWF Spec Compiler Surfacing Review
 description: Reviews AWF specification and compiler updates (starting with the main JSON schema) to detect new AWF features that should be surfaced in gh-aw.
@@ -11,7 +12,8 @@ permissions:
   pull-requests: read
 tracker-id: daily-awf-spec-compiler-surfacing
 engine:
-  id: claude
+  id: pi
+  model: copilot/gpt-5.4
 tools:
   cli-proxy: true
   github:
@@ -33,6 +35,8 @@ timeout-minutes: 30
 strict: true
 imports:
   - shared/otlp.md
+features:
+  gh-aw-detection: true
 ---
 
 {{#runtime-import? .github/shared-instructions.md}}

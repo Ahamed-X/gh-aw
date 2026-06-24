@@ -6,6 +6,7 @@ import (
 
 	"github.com/github/gh-aw/pkg/logger"
 	"github.com/github/gh-aw/pkg/parser"
+	"github.com/github/gh-aw/pkg/setutil"
 )
 
 var orchestratorWorkflowLog = logger.New("workflow:compiler_orchestrator_workflow")
@@ -145,7 +146,7 @@ func (c *Compiler) validateWorkflowEngineSettings(cleanPath string, workflowData
 		c.validateEngineVersion,
 		c.validatePlaywrightMode,
 		c.validateEngineHarnessScript,
-		c.validateEngineCopilotSDKDriver,
+		c.validateEngineDriver,
 		c.validateEngineMCPSessionTimeout,
 		c.validateEngineMCPToolTimeout,
 	}
@@ -196,10 +197,18 @@ func (c *Compiler) populateWorkflowBuildContext(ctx *workflowBuildContext) error
 	if err := c.mergeImportedWorkflowConfiguration(ctx); err != nil {
 		return err
 	}
-	c.processAndMergeSteps(ctx.frontmatter.Frontmatter, ctx.workflowData, ctx.engineSetup.importsResult)
-	c.processAndMergePreSteps(ctx.frontmatter.Frontmatter, ctx.workflowData, ctx.engineSetup.importsResult)
-	c.processAndMergePreAgentSteps(ctx.frontmatter.Frontmatter, ctx.workflowData, ctx.engineSetup.importsResult)
-	c.processAndMergePostSteps(ctx.frontmatter.Frontmatter, ctx.workflowData, ctx.engineSetup.importsResult)
+	if err := c.processAndMergeSteps(ctx.frontmatter.Frontmatter, ctx.workflowData, ctx.engineSetup.importsResult); err != nil {
+		return formatCompilerError(ctx.cleanPath, "error", err.Error(), err)
+	}
+	if err := c.processAndMergePreSteps(ctx.frontmatter.Frontmatter, ctx.workflowData, ctx.engineSetup.importsResult); err != nil {
+		return formatCompilerError(ctx.cleanPath, "error", err.Error(), err)
+	}
+	if err := c.processAndMergePreAgentSteps(ctx.frontmatter.Frontmatter, ctx.workflowData, ctx.engineSetup.importsResult); err != nil {
+		return formatCompilerError(ctx.cleanPath, "error", err.Error(), err)
+	}
+	if err := c.processAndMergePostSteps(ctx.frontmatter.Frontmatter, ctx.workflowData, ctx.engineSetup.importsResult); err != nil {
+		return formatCompilerError(ctx.cleanPath, "error", err.Error(), err)
+	}
 	c.processAndMergeServices(ctx.frontmatter.Frontmatter, ctx.workflowData, ctx.engineSetup.importsResult)
 	ctx.workflowData.KnownActionCredentialEnvVars = DetectKnownCredentialLeakingActionsFromWorkflowData(ctx.workflowData)
 	if err := c.extractAdditionalConfigurations(ctx.frontmatter.Frontmatter, ctx.toolsResult.tools, ctx.markdownDir, ctx.workflowData, ctx.engineSetup.importsResult, ctx.toolsResult.rawMainMarkdown, ctx.toolsResult.safeOutputs); err != nil {
@@ -248,15 +257,27 @@ func (c *Compiler) mergeImportedObservability(workflowData *WorkflowData, merged
 	}
 	mainObs := extractRawObservabilityMap(workflowData.RawFrontmatter)
 	mergedEndpoints, mainCount, importAdded := mergeRawOTLPEndpoints(mainObs, importedObs)
-	mergedAttrs := mergeOTLPCustomAttributes(
+	mergedAttrs := mergeOTLPStringMaps(
 		extractOTLPCustomAttributesFromObsMap(mainObs),
 		extractOTLPCustomAttributesFromObsMap(importedObs),
+	)
+	mergedResourceAttrs := mergeOTLPStringMaps(
+		extractOTLPResourceAttributesFromObsMap(mainObs),
+		extractOTLPResourceAttributesFromObsMap(importedObs),
 	)
 	githubApp := extractRawOTLPGitHubAppMap(mainObs)
 	if githubApp == nil {
 		githubApp = extractRawOTLPGitHubAppMap(importedObs)
 	}
-	applyMergedRawObservability(workflowData.RawFrontmatter, mergedEndpoints, mergedAttrs, githubApp, mainCount, importAdded)
+	applyMergedRawObservability(
+		workflowData.RawFrontmatter,
+		mergedEndpoints,
+		mergedAttrs,
+		mergedResourceAttrs,
+		githubApp,
+		mainCount,
+		importAdded,
+	)
 }
 
 func extractRawObservabilityMap(rawFrontmatter map[string]any) map[string]any {
@@ -268,17 +289,20 @@ func extractRawObservabilityMap(rawFrontmatter map[string]any) map[string]any {
 }
 
 func mergeRawOTLPEndpoints(mainObs map[string]any, importedObs map[string]any) (mergedEndpoints []any, mainCount int, importAdded int) {
-	seen := make(map[string]bool)
+	seen := make(map[string]struct {
+	})
 	for _, ep := range extractRawOTLPEndpointMaps(mainObs) {
-		if url, _ := ep["url"].(string); url != "" && !seen[url] {
-			seen[url] = true
+		if url, _ := ep["url"].(string); url != "" && !setutil.Contains(seen, url) {
+			seen[url] = struct {
+			}{}
 			mergedEndpoints = append(mergedEndpoints, ep)
 		}
 	}
 	mainCount = len(mergedEndpoints)
 	for _, ep := range extractRawOTLPEndpointMaps(importedObs) {
-		if url, _ := ep["url"].(string); url != "" && !seen[url] {
-			seen[url] = true
+		if url, _ := ep["url"].(string); url != "" && !setutil.Contains(seen, url) {
+			seen[url] = struct {
+			}{}
 			mergedEndpoints = append(mergedEndpoints, ep)
 			importAdded++
 		}
@@ -290,11 +314,12 @@ func applyMergedRawObservability(
 	rawFrontmatter map[string]any,
 	mergedEndpoints []any,
 	mergedAttrs map[string]string,
+	mergedResourceAttrs map[string]string,
 	githubApp map[string]any,
 	mainCount int,
 	importAdded int,
 ) {
-	if len(mergedEndpoints) == 0 && len(mergedAttrs) == 0 && githubApp == nil {
+	if len(mergedEndpoints) == 0 && len(mergedAttrs) == 0 && len(mergedResourceAttrs) == 0 && githubApp == nil {
 		return
 	}
 	newOTLP := map[string]any{}
@@ -304,6 +329,9 @@ func applyMergedRawObservability(
 	if len(mergedAttrs) > 0 {
 		newOTLP["attributes"] = mergedAttrs
 	}
+	if len(mergedResourceAttrs) > 0 {
+		newOTLP["resource-attributes"] = mergedResourceAttrs
+	}
 	if githubApp != nil {
 		newOTLP["github-app"] = githubApp
 	}
@@ -311,6 +339,9 @@ func applyMergedRawObservability(
 	orchestratorWorkflowLog.Printf("Merged OTLP endpoints into RawFrontmatter: %d from main workflow, %d from imports (%d total)", mainCount, importAdded, len(mergedEndpoints))
 	if len(mergedAttrs) > 0 {
 		orchestratorWorkflowLog.Printf("Merged %d custom OTLP attributes into RawFrontmatter", len(mergedAttrs))
+	}
+	if len(mergedResourceAttrs) > 0 {
+		orchestratorWorkflowLog.Printf("Merged %d OTLP resource attributes into RawFrontmatter", len(mergedResourceAttrs))
 	}
 }
 
@@ -639,7 +670,10 @@ func (c *Compiler) processOnSectionAndFilters(
 		}
 		typedSteps, convErr := SliceToSteps(anySteps)
 		if convErr == nil {
-			typedSteps = applyActionPinsToTypedSteps(typedSteps, workflowData)
+			typedSteps, convErr = applyActionPinsToTypedSteps(typedSteps, workflowData)
+			if convErr != nil {
+				return fmt.Errorf("on.steps: %w", convErr)
+			}
 			for i, s := range typedSteps {
 				onSteps[i] = s.ToMap()
 			}

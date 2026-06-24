@@ -54,15 +54,17 @@ func buildMaintenanceWorkflowYAML(
 	var yaml strings.Builder
 
 	// Add workflow header with logo and instructions
-	customInstructions := `Alternative regeneration methods:
-  make recompile
+	customInstructions := `This file defines the generated agentic maintenance workflow for this repository.
+It runs scheduled cleanup for expiring safe outputs and supports manual maintenance operations.
 
-Or use the gh-aw CLI directly:
-  ./gh-aw compile --validate --verbose
+This workflow is generated automatically when workflows use expiring safe outputs
+or when repository maintenance features are enabled in .github/workflows/aw.json.
 
-The workflow is generated when any workflow uses the 'expires' field
-in create-discussions, create-issues, or create-pull-request safe-outputs configuration.
-Schedule frequency is automatically determined by the shortest expiration time.`
+To disable maintenance workflow generation, set in .github/workflows/aw.json:
+  {"maintenance": false}
+
+Agentic maintenance docs:
+  https://github.github.com/gh-aw/reference/ephemerals/#manual-maintenance-operations`
 
 	header := GenerateWorkflowHeader("", "pkg/workflow/maintenance_workflow.go", customInstructions)
 	yaml.WriteString(header)
@@ -299,7 +301,9 @@ jobs:
 
       - name: Record outputs
         id: record
-        run: echo "operation=${{ inputs.operation }}" >> "$GITHUB_OUTPUT"
+        env:
+          GH_AW_OPERATION: ${{ inputs.operation }}
+        run: echo "operation=$GH_AW_OPERATION" >> "$GITHUB_OUTPUT"
 `)
 
 	// Add update_pull_request_branches job for workflow_dispatch with operation == 'update_pull_request_branches'
@@ -402,7 +406,9 @@ jobs:
 
       - name: Record outputs
         id: record
-        run: echo "run_url=${{ inputs.run_url }}" >> "$GITHUB_OUTPUT"
+        env:
+          GH_AW_RUN_URL: ${{ inputs.run_url }}
+        run: echo "run_url=$GH_AW_RUN_URL" >> "$GITHUB_OUTPUT"
 `)
 
 	// Add create_labels job for workflow_dispatch with operation == 'create_labels'
@@ -502,12 +508,12 @@ jobs:
           GH_AW_CMD_PREFIX: ` + getCLICmdPrefix(actionMode) + `
         run: |
           ${GH_AW_CMD_PREFIX} logs \
-            --repo "${{ github.repository }}" \
+            --repo "$GITHUB_REPOSITORY" \
             --start-date -1w \
-            --count 100 \
+            --count 500 \
             --output ./.cache/gh-aw/activity-report-logs \
             --format markdown \
-            > ./.cache/gh-aw/activity-report-logs/report.md
+            --report-file ./.cache/gh-aw/activity-report-logs/report.md
 
       - name: Save activity report logs cache
         if: ${{ always() }}
@@ -612,7 +618,7 @@ jobs:
         run: |
           mkdir -p ./.cache/gh-aw/forecast
           set +e
-          ${GH_AW_CMD_PREFIX} forecast --repo "${{ github.repository }}" --timeout 30 --verbose --json > ./.cache/gh-aw/forecast/report.json
+          ${GH_AW_CMD_PREFIX} forecast --repo "$GITHUB_REPOSITORY" --timeout 30 --verbose --json > ./.cache/gh-aw/forecast/report.json
           forecast_exit_code=$?
           set -e
           if [ "${forecast_exit_code}" -eq 124 ]; then

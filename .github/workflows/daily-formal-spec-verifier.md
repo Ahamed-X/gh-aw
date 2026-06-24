@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "🔬"
 name: Daily Formal Spec Verifier
 description: >
@@ -40,17 +41,21 @@ tools:
     branch-name: memory/formal-spec-verifier
     file-glob: ["*.md", "*.json"]
     max-file-size: 65536
+  edit: null
   bash:
     - "find specs -type f -name \"*.md\" | sort"
     - "cat specs/*.md"
     - "find . -name \"*_test.go\" -path \"*/pkg/*\" | head -20"
     - "cat pkg/workflow/*.go | head -200"
     - "cat pkg/cli/*.go"
+    - "sed *"
 
 safe-outputs:
   mentions: false
   allowed-github-references: []
   max-bot-mentions: 1
+features:
+  gh-aw-detection: true
 ---
 
 {{#runtime-import? .github/shared-instructions.md}}
@@ -119,6 +124,8 @@ If a note file exists for the selected spec, read it and use the prior predicate
 
 Read the selected spec file in full with `bash`.
 
+Use built-in file inspection tools only for read-only analysis when bash output is insufficient. Do not modify repository files.
+
 Extract:
 
 - **Purpose**: the system or component being specified.
@@ -171,6 +178,14 @@ Use existing types, functions, and interfaces from the codebase where possible (
 ## Step 5 — Create Issue
 
 Create exactly one issue using the `create_issue` safe output.
+
+### Output Contract (Required)
+
+1. Draft the title and body locally first if needed, but emit exactly one final `create_issue` safe output only after the full payload is complete.
+2. Do **not** use `bash`, `cli-proxy`, or the `safeoutputs` CLI to create the issue or inspect the tool schema. Emit the safe output directly with `title` and `body` arguments.
+3. Do **not** use `python3`, `node`, `jq`, or any other scripting runtime to construct or validate the issue payload — build the body string inline and emit the safe output directly.
+4. Never retry `create_issue` with empty, placeholder, or partial arguments.
+5. If the quality checks below cannot be met, emit `report_incomplete` directly as a safe output instead of `create_issue`.
 
 ### Issue format
 
@@ -234,10 +249,10 @@ One-paragraph description of the spec and what was formalized.
 Before emitting `create_issue`, verify the body:
 - Contains all required sections (`Summary`, `Specification`, `Formal Model`, `Behavioral Coverage Map`, `Generated Test Suite`, `Usage`, `Context`).
 - Has at least 5 rows in the Behavioral Coverage Map.
-- The generated test file compiles without errors (review for syntax mistakes).
+- The generated test file has no obvious syntax errors — **visual review only**: scan for mismatched braces, missing imports, and undefined identifiers. Do **not** run `go build`, `go test`, `go version`, `python3`, `node`, `jq`, or any compiler or runtime to verify.
 - Is at least 1200 characters long.
 
-If these checks cannot be met, emit `report_incomplete` instead of `create_issue`.
+If these checks cannot be met, emit `report_incomplete` directly as a safe output instead of `create_issue`.
 
 ---
 

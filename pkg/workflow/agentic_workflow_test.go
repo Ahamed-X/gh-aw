@@ -99,6 +99,7 @@ func TestAgenticWorkflowsMCPConfigGeneration(t *testing.T) {
 		{"Claude", NewClaudeEngine()},
 		{"Copilot", NewCopilotEngine()},
 		{"Codex", NewCodexEngine()},
+		{"Pi", NewPiEngine()},
 	}
 
 	for _, e := range engines {
@@ -133,6 +134,29 @@ func TestAgenticWorkflowsHasMCPServers(t *testing.T) {
 		"HasMCPServers should return true when agentic-workflows tool is configured")
 }
 
+// TestPiMCPConfig_SafeOutputs verifies that the Pi engine generates a valid MCP config
+// that includes the safeoutputs server. This directly documents the bug fixed in
+// cda969a: Pi engine was not rendering MCP config so safeoutputs was never mounted.
+func TestPiMCPConfig_SafeOutputs(t *testing.T) {
+	workflowData := &WorkflowData{
+		Tools: map[string]any{
+			"safe-outputs": map[string]any{
+				"create-issue": map[string]any{},
+			},
+		},
+	}
+
+	var sb strings.Builder
+	err := NewPiEngine().RenderMCPConfig(&sb, workflowData.Tools, []string{"safe-outputs"}, workflowData)
+	require.NoError(t, err)
+
+	result := sb.String()
+	assert.Contains(t, result, "safeoutputs",
+		"Pi MCP config must include safeoutputs server so the CLI can be mounted")
+	assert.Contains(t, result, "start_safe_outputs_mcp.sh",
+		"Pi MCP config must reference the safe-outputs startup script")
+}
+
 func TestAgenticWorkflowsInstallStepIncludesGHToken(t *testing.T) {
 	// Create workflow data using helper
 	workflowData := workflowDataWithAgenticWorkflows()
@@ -154,7 +178,7 @@ func TestAgenticWorkflowsInstallStepIncludesGHToken(t *testing.T) {
 		"MCP setup should include gh-aw installation step when agentic-workflows tool is enabled")
 
 	// Verify setup-cli action is used with default token expression
-	assert.Contains(t, result, "uses: github/gh-aw/actions/setup-cli@",
+	assert.Contains(t, result, "uses: github/gh-aw-actions/setup-cli@",
 		"install step should use setup-cli action")
 	assert.Contains(t, result, "version: 'v0.72.1'",
 		"install step should install the compiler release version")
@@ -200,7 +224,7 @@ func TestAgenticWorkflowsInstallStepPresentWithoutImport(t *testing.T) {
 		"dev mode should build and install gh-aw from source")
 	assert.Contains(t, result, "gh extension install .",
 		"dev mode should install gh-aw extension from local checkout")
-	assert.NotContains(t, result, "uses: github/gh-aw/actions/setup-cli@",
+	assert.NotContains(t, result, "setup-cli@",
 		"dev mode should not use setup-cli action")
 }
 

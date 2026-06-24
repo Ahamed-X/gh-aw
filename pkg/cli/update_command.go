@@ -53,7 +53,7 @@ Note: In GitHub Enterprise repos, shorthand source specs resolve on your enterpr
   ` + string(constants.CLIExtensionPrefix) + ` update --no-merge         # Override local changes with upstream
   ` + string(constants.CLIExtensionPrefix) + ` update repo-assist --major # Allow major version updates
   ` + string(constants.CLIExtensionPrefix) + ` update --force            # Force update even if no changes
-  ` + string(constants.CLIExtensionPrefix) + ` update --disable-release-bump  # Update without force-bumping all action versions
+  ` + string(constants.CLIExtensionPrefix) + ` update --no-release-bump     # Update without force-bumping all action versions
   ` + string(constants.CLIExtensionPrefix) + ` update --no-compile           # Update without regenerating lock files
   ` + string(constants.CLIExtensionPrefix) + ` update --no-redirect          # Refuse workflows that use redirect frontmatter
   ` + string(constants.CLIExtensionPrefix) + ` update --dir custom/workflows  # Update workflows in custom directory
@@ -70,10 +70,14 @@ Note: In GitHub Enterprise repos, shorthand source specs resolve on your enterpr
 			noStopAfter, _ := cmd.Flags().GetBool("no-stop-after")
 			stopAfter, _ := cmd.Flags().GetString("stop-after")
 			noMergeFlag, _ := cmd.Flags().GetBool("no-merge")
-			disableReleaseBump, _ := cmd.Flags().GetBool("disable-release-bump")
+			disableReleaseBump, _ := cmd.Flags().GetBool("no-release-bump")
+			disableReleaseBumpLegacy, _ := cmd.Flags().GetBool("disable-release-bump")
+			disableReleaseBump = disableReleaseBump || disableReleaseBumpLegacy
 			noCompile, _ := cmd.Flags().GetBool("no-compile")
 			noRedirect, _ := cmd.Flags().GetBool("no-redirect")
-			disableSecurityScanner, _ := cmd.Flags().GetBool("disable-security-scanner")
+			disableSecurityScanner, _ := cmd.Flags().GetBool("no-security-scanner")
+			disableSecurityScannerLegacy, _ := cmd.Flags().GetBool("disable-security-scanner")
+			disableSecurityScanner = disableSecurityScanner || disableSecurityScannerLegacy
 			createPRFlag, _ := cmd.Flags().GetBool("create-pull-request")
 			prFlagAlias, _ := cmd.Flags().GetBool("pr")
 			createPR := createPRFlag || prFlagAlias
@@ -137,8 +141,12 @@ Note: In GitHub Enterprise repos, shorthand source specs resolve on your enterpr
 	cmd.Flags().Bool("no-stop-after", false, "Remove any stop-after field from the workflow")
 	cmd.Flags().String("stop-after", "", "Override stop-after value in the workflow (e.g., '+48h', '2025-12-31 23:59:59')")
 	cmd.Flags().Bool("no-merge", false, "Override local changes with upstream version instead of merging")
+	cmd.Flags().Bool("no-release-bump", false, "Disable automatic major version bumps for all actions (only core actions/* are force-updated)")
 	cmd.Flags().Bool("disable-release-bump", false, "Disable automatic major version bumps for all actions (only core actions/* are force-updated)")
+	_ = cmd.Flags().MarkHidden("disable-release-bump")
+	cmd.Flags().Bool("no-security-scanner", false, "Disable security scanning of workflow markdown content")
 	cmd.Flags().Bool("disable-security-scanner", false, "Disable security scanning of workflow markdown content")
+	_ = cmd.Flags().MarkHidden("disable-security-scanner")
 	cmd.Flags().Bool("no-compile", false, "Skip recompiling workflows (do not modify lock files)")
 	cmd.Flags().Bool("no-redirect", false, "Refuse updates when redirect frontmatter is present")
 	addRepoFlag(cmd)
@@ -168,18 +176,11 @@ func RunUpdateWorkflows(ctx context.Context, opts UpdateWorkflowsOptions) error 
 
 	// Update GitHub Actions versions in actions-lock.json.
 	// By default all actions are updated to the latest major version.
-	// Pass --disable-release-bump to revert to only forcing updates for core (actions/*) actions.
+	// Pass --no-release-bump to revert to only forcing updates for core (actions/*) actions.
 	updateLog.Printf("Updating GitHub Actions versions in actions-lock.json: allowMajor=%v, disableReleaseBump=%v", opts.AllowMajor, opts.DisableReleaseBump)
 	if err := UpdateActions(ctx, opts.AllowMajor, opts.Verbose, opts.DisableReleaseBump, opts.CoolDown); err != nil {
 		// Non-fatal: warn but don't fail the update
 		fmt.Fprintln(os.Stderr, console.FormatWarningMessage(fmt.Sprintf("Warning: Failed to update actions-lock.json: %v", err)))
-	}
-
-	// Resolve and store SHA-256 digest pins for container images referenced in lock files.
-	updateLog.Print("Updating container image digest pins")
-	if err := UpdateContainerPins(ctx, opts.WorkflowsDir, opts.Verbose); err != nil {
-		// Non-fatal: Docker may not be available in all environments.
-		fmt.Fprintln(os.Stderr, console.FormatWarningMessage(fmt.Sprintf("Warning: Failed to update container pins: %v", err)))
 	}
 
 	// Update action references in user-provided steps within workflow .md files.
@@ -190,8 +191,57 @@ func RunUpdateWorkflows(ctx context.Context, opts UpdateWorkflowsOptions) error 
 		fmt.Fprintln(os.Stderr, console.FormatWarningMessage(fmt.Sprintf("Warning: Failed to update action references in workflow files: %v", err)))
 	}
 
+	// Resolve and store SHA-256 digest pins for container images referenced in lock files.
+	// This runs after compilation (via UpdateActionsInWorkflowFiles) so that the lock files
+	// already reflect the current AWF version; stale pins from superseded versions are pruned
+	// and new versions are resolved in a single pass.
+	updateLog.Print("Updating container image digest pins")
+	newContainerPins, err := UpdateContainerPins(ctx, opts.WorkflowsDir, opts.Verbose)
+	if err != nil {
+		// Non-fatal: Docker may not be available in all environments.
+		fmt.Fprintln(os.Stderr, console.FormatWarningMessage(fmt.Sprintf("Warning: Failed to update container pins: %v", err)))
+	}
+
+	// Recompile all workflows when new container pins were added so that the
+	// lock files embed the digest-pinned image references (image:tag@sha256:…).
+	if newContainerPins && !opts.NoCompile {
+		updateLog.Print("Recompiling workflows to embed new container digest pins")
+		fmt.Fprintln(os.Stderr, console.FormatInfoMessage("Recompiling workflows to embed container digest pins..."))
+		recompileErr := recompileAllWorkflows(ctx, opts.WorkflowsDir, opts.EngineOverride, opts.Verbose)
+		if recompileErr != nil {
+			fmt.Fprintln(os.Stderr, console.FormatWarningMessage(fmt.Sprintf("Warning: Failed to recompile workflows after container pin update: %v", recompileErr)))
+		}
+	}
+
 	updateLog.Printf("Update process complete: had_error=%v", firstErr != nil)
 	return firstErr
+}
+
+// recompileAllWorkflows recompiles all .md workflow files in the given directory.
+// This is used after container pin updates to embed digest-pinned image references
+// in the generated lock files.
+func recompileAllWorkflows(ctx context.Context, workflowsDir, engineOverride string, verbose bool) error {
+	if workflowsDir == "" {
+		workflowsDir = getWorkflowsDir()
+	}
+
+	entries, err := os.ReadDir(workflowsDir)
+	if err != nil {
+		return fmt.Errorf("failed to read workflows directory: %w", err)
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
+			continue
+		}
+		path := filepath.Join(workflowsDir, entry.Name())
+		if err := compileWorkflowWithRefresh(ctx, path, verbose, true, engineOverride, false); err != nil {
+			if verbose {
+				fmt.Fprintln(os.Stderr, console.FormatWarningMessage(fmt.Sprintf("Failed to recompile %s: %v", entry.Name(), err)))
+			}
+		}
+	}
+	return nil
 }
 
 func runUpdateForTargetRepo(ctx context.Context, targetRepo string, opts UpdateWorkflowsOptions, createPR bool, verbose bool) error {

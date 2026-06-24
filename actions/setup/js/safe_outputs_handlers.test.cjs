@@ -210,6 +210,25 @@ describe("safe_outputs_handlers", () => {
   });
 
   describe("uploadAssetHandler", () => {
+    let testRunnerTemp;
+
+    beforeEach(() => {
+      const testId = Math.random().toString(36).substring(7);
+      testRunnerTemp = `/tmp/test-runner-temp-${testId}`;
+      process.env.RUNNER_TEMP = testRunnerTemp;
+    });
+
+    afterEach(() => {
+      delete process.env.RUNNER_TEMP;
+      try {
+        if (fs.existsSync(testRunnerTemp)) {
+          fs.rmSync(testRunnerTemp, { recursive: true, force: true });
+        }
+      } catch {
+        // Ignore cleanup errors
+      }
+    });
+
     it("should generate blob URL with raw=true for github.com", () => {
       process.env.GH_AW_ASSETS_BRANCH = "test-branch";
       process.env.GITHUB_SERVER_URL = "https://github.com";
@@ -263,6 +282,19 @@ describe("safe_outputs_handlers", () => {
       expect(result.content[0].type).toBe("text");
       const resultData = JSON.parse(result.content[0].text);
       expect(resultData.result).toContain("https://");
+    });
+
+    it("should stage asset file under RUNNER_TEMP not /tmp", () => {
+      process.env.GH_AW_ASSETS_BRANCH = "test-branch";
+
+      const testFile = path.join(testWorkspaceDir, "chart.png");
+      fs.writeFileSync(testFile, "chart content");
+
+      handlers.uploadAssetHandler({ path: testFile });
+
+      // File must be staged under RUNNER_TEMP, not hardcoded /tmp
+      const expectedDir = path.join(testRunnerTemp, "gh-aw", "safeoutputs", "assets");
+      expect(fs.existsSync(path.join(expectedDir, "chart.png"))).toBe(true);
     });
 
     it("should throw error if GH_AW_ASSETS_BRANCH not set", () => {
@@ -508,6 +540,56 @@ describe("safe_outputs_handlers", () => {
 
       // Entry path should be the directory basename
       expect(mockAppendSafeOutput).toHaveBeenCalledWith(expect.objectContaining({ type: "upload_artifact", path: "charts" }));
+    });
+  });
+
+  describe("defaultHandler wildcard target validation", () => {
+    it("should require explicit discussion_number when update_discussion target is '*'", () => {
+      const wildcardHandlers = createHandlers(mockServer, mockAppendSafeOutput, {
+        update_discussion: {
+          target: "*",
+        },
+      });
+
+      const result = wildcardHandlers.defaultHandler("update_discussion")({ body: "Updated discussion body." });
+
+      expect(result.isError).toBe(true);
+      const responseData = JSON.parse(result.content[0].text);
+      expect(responseData.result).toBe("error");
+      expect(responseData.error).toContain("requires discussion_number");
+      expect(mockAppendSafeOutput).not.toHaveBeenCalled();
+    });
+
+    it("should require explicit pull_request_number when close_pull_request target is '*'", () => {
+      const wildcardHandlers = createHandlers(mockServer, mockAppendSafeOutput, {
+        close_pull_request: {
+          target: "*",
+        },
+      });
+
+      const result = wildcardHandlers.defaultHandler("close_pull_request")({ body: "Closing in favor of a newer PR." });
+
+      expect(result.isError).toBe(true);
+      const responseData = JSON.parse(result.content[0].text);
+      expect(responseData.result).toBe("error");
+      expect(responseData.error).toContain("requires pull_request_number");
+      expect(mockAppendSafeOutput).not.toHaveBeenCalled();
+    });
+
+    it("should require explicit pull_request_number when create_check_run target is '*'", () => {
+      const wildcardHandlers = createHandlers(mockServer, mockAppendSafeOutput, {
+        create_check_run: {
+          target: "*",
+        },
+      });
+
+      const result = wildcardHandlers.defaultHandler("create_check_run")({ conclusion: "success", title: "Checks passed", summary: "All checks passed." });
+
+      expect(result.isError).toBe(true);
+      const responseData = JSON.parse(result.content[0].text);
+      expect(responseData.result).toBe("error");
+      expect(responseData.error).toContain("requires pull_request_number");
+      expect(mockAppendSafeOutput).not.toHaveBeenCalled();
     });
   });
 
@@ -1126,6 +1208,22 @@ describe("safe_outputs_handlers", () => {
       expect(mockAppendSafeOutput).not.toHaveBeenCalled();
     });
 
+    it("should require explicit pull_request_number when push_to_pull_request_branch target is '*'", async () => {
+      const wildcardHandlers = createHandlers(mockServer, mockAppendSafeOutput, {
+        push_to_pull_request_branch: {
+          target: "*",
+        },
+      });
+
+      const result = await wildcardHandlers.pushToPullRequestBranchHandler({ message: "Apply requested changes." });
+
+      expect(result.isError).toBe(true);
+      const responseData = JSON.parse(result.content[0].text);
+      expect(responseData.result).toBe("error");
+      expect(responseData.error).toContain("requires pull_request_number");
+      expect(mockAppendSafeOutput).not.toHaveBeenCalled();
+    });
+
     it("should reject obvious exploratory test payloads before recording a PR branch update intent", async () => {
       // The agent can no longer supply `branch`; the handler derives it from
       // the current working checkout. Model the failure mode where the
@@ -1574,41 +1672,65 @@ describe("safe_outputs_handlers", () => {
 
   describe("addCommentHandler", () => {
     it("should auto-generate a temporary_id when not provided", () => {
-      const result = handlers.addCommentHandler({ body: "Valid comment body" });
+      const savedContext = global.context;
+      global.context = { ...global.context, eventName: "issues", payload: { issue: { number: 5 } } };
+      try {
+        const result = handlers.addCommentHandler({ body: "Valid comment body" });
 
-      expect(result).toHaveProperty("content");
-      const responseData = JSON.parse(result.content[0].text);
-      expect(responseData.result).toBe("success");
-      expect(responseData.temporary_id).toBeDefined();
-      expect(responseData.temporary_id).toMatch(/^aw_[A-Za-z0-9]{3,12}$/);
+        expect(result).toHaveProperty("content");
+        const responseData = JSON.parse(result.content[0].text);
+        expect(responseData.result).toBe("success");
+        expect(responseData.temporary_id).toBeDefined();
+        expect(responseData.temporary_id).toMatch(/^aw_[A-Za-z0-9]{3,12}$/);
+      } finally {
+        global.context = savedContext;
+      }
     });
 
     it("should use the provided temporary_id when given", () => {
-      const result = handlers.addCommentHandler({ body: "Valid comment body", temporary_id: "aw_abc123" });
+      const savedContext = global.context;
+      global.context = { ...global.context, eventName: "issues", payload: { issue: { number: 5 } } };
+      try {
+        const result = handlers.addCommentHandler({ body: "Valid comment body", temporary_id: "aw_abc123" });
 
-      expect(result).toHaveProperty("content");
-      const responseData = JSON.parse(result.content[0].text);
-      expect(responseData.result).toBe("success");
-      expect(responseData.temporary_id).toBe("aw_abc123");
+        expect(result).toHaveProperty("content");
+        const responseData = JSON.parse(result.content[0].text);
+        expect(responseData.result).toBe("success");
+        expect(responseData.temporary_id).toBe("aw_abc123");
+      } finally {
+        global.context = savedContext;
+      }
     });
 
     it("should return comment reference using temporary_id", () => {
-      const result = handlers.addCommentHandler({ body: "Valid comment body" });
+      const savedContext = global.context;
+      global.context = { ...global.context, eventName: "issues", payload: { issue: { number: 5 } } };
+      try {
+        const result = handlers.addCommentHandler({ body: "Valid comment body" });
 
-      const responseData = JSON.parse(result.content[0].text);
-      expect(responseData.comment).toBe(`#${responseData.temporary_id}`);
+        const responseData = JSON.parse(result.content[0].text);
+        expect(responseData.comment).toBe(`#${responseData.temporary_id}`);
+      } finally {
+        global.context = savedContext;
+      }
     });
 
     it("should record the temporary_id in the NDJSON entry", () => {
-      handlers.addCommentHandler({ body: "Valid comment body", temporary_id: "aw_test01" });
+      const savedContext = global.context;
+      global.context = { ...global.context, eventName: "issues", payload: { issue: { number: 5 } } };
+      try {
+        handlers.addCommentHandler({ body: "Valid comment body", temporary_id: "aw_test01" });
 
-      expect(mockAppendSafeOutput).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: "add_comment",
-          body: "Valid comment body",
-          temporary_id: "aw_test01",
-        })
-      );
+        expect(mockAppendSafeOutput).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: "add_comment",
+            body: "Valid comment body",
+            temporary_id: "aw_test01",
+          })
+        );
+      } finally {
+        global.context = savedContext;
+      }
     });
 
     it("should throw validation error for oversized comment body", () => {
@@ -1618,14 +1740,20 @@ describe("safe_outputs_handlers", () => {
     });
 
     it("should reject obvious exploratory placeholder comments before recording them", () => {
-      const result = handlers.addCommentHandler({ body: "test" });
+      const savedContext = global.context;
+      global.context = { ...global.context, eventName: "issues", payload: { issue: { number: 5 } } };
+      try {
+        const result = handlers.addCommentHandler({ body: "test" });
 
-      expect(result.isError).toBe(true);
-      const responseData = JSON.parse(result.content[0].text);
-      expect(responseData.result).toBe("error");
-      expect(responseData.error).toContain("Refusing to record an exploratory comment");
-      expect(responseData.error).toContain("noop or report_incomplete");
-      expect(mockAppendSafeOutput).not.toHaveBeenCalled();
+        expect(result.isError).toBe(true);
+        const responseData = JSON.parse(result.content[0].text);
+        expect(responseData.result).toBe("error");
+        expect(responseData.error).toContain("Refusing to record an exploratory comment");
+        expect(responseData.error).toContain("noop or report_incomplete");
+        expect(mockAppendSafeOutput).not.toHaveBeenCalled();
+      } finally {
+        global.context = savedContext;
+      }
     });
 
     it("should require explicit item_number when add_comment target is '*'", () => {
@@ -1642,6 +1770,177 @@ describe("safe_outputs_handlers", () => {
       expect(responseData.result).toBe("error");
       expect(responseData.error).toContain("requires item_number");
       expect(mockAppendSafeOutput).not.toHaveBeenCalled();
+    });
+
+    it("should refuse reply_to_id when discussions are not enabled in config", () => {
+      // Default handlers have no discussions: true in config
+      // Discussion check precedes context check so this error surfaces regardless of event context
+      const result = handlers.addCommentHandler({
+        body: "Reply to a discussion thread",
+        reply_to_id: "DC_kwDOABcD1M4AaBbC",
+      });
+
+      expect(result.isError).toBe(true);
+      const responseData = JSON.parse(result.content[0].text);
+      expect(responseData.result).toBe("error");
+      expect(responseData.error).toContain("discussion comments are not enabled");
+      expect(responseData.error).toContain("discussions: true");
+      expect(responseData.error).toContain("safe-outputs.add-comment");
+      expect(mockAppendSafeOutput).not.toHaveBeenCalled();
+    });
+
+    it("should allow reply_to_id when discussions are enabled in config", () => {
+      const savedContext = global.context;
+      global.context = { ...global.context, eventName: "discussion", payload: { discussion: { number: 3 } } };
+      try {
+        const discussionHandlers = createHandlers(mockServer, mockAppendSafeOutput, {
+          "add-comment": { enabled: true, discussions: true },
+        });
+
+        const result = discussionHandlers.addCommentHandler({
+          body: "Reply to a discussion thread with real content that is not a test placeholder",
+          reply_to_id: "DC_kwDOABcD1M4AaBbC",
+        });
+
+        expect(result.isError).toBeUndefined();
+        const responseData = JSON.parse(result.content[0].text);
+        expect(responseData.result).toBe("success");
+        expect(mockAppendSafeOutput).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: "add_comment",
+            reply_to_id: "DC_kwDOABcD1M4AaBbC",
+          })
+        );
+      } finally {
+        global.context = savedContext;
+      }
+    });
+
+    it("should return intent error when target is triggering (default) and not in issue/PR/discussion context", () => {
+      const savedContext = global.context;
+      global.context = { ...global.context, eventName: "push", payload: {} };
+      try {
+        const result = handlers.addCommentHandler({ body: "A real comment body that is substantive" });
+        expect(result.isError).toBe(true);
+        const responseData = JSON.parse(result.content[0].text);
+        expect(responseData.result).toBe("error");
+        expect(responseData.error).toContain("add_comment");
+        expect(responseData.error).toContain('"push"');
+        expect(mockAppendSafeOutput).not.toHaveBeenCalled();
+      } finally {
+        global.context = savedContext;
+      }
+    });
+
+    it("should return intent error on schedule event with default target", () => {
+      const savedContext = global.context;
+      global.context = { ...global.context, eventName: "schedule", payload: {} };
+      try {
+        const result = handlers.addCommentHandler({ body: "A real comment body that is substantive" });
+        expect(result.isError).toBe(true);
+        const responseData = JSON.parse(result.content[0].text);
+        expect(responseData.result).toBe("error");
+        expect(responseData.error).toContain('"schedule"');
+        expect(responseData.error).toContain("create_discussion");
+        expect(mockAppendSafeOutput).not.toHaveBeenCalled();
+      } finally {
+        global.context = savedContext;
+      }
+    });
+
+    it("should write entry when target is triggering and in PR context", () => {
+      const savedContext = global.context;
+      global.context = { ...global.context, eventName: "pull_request", payload: { pull_request: { number: 7 } } };
+      try {
+        const result = handlers.addCommentHandler({ body: "A real comment body for this pull request" });
+        expect(result.isError).toBeUndefined();
+        const responseData = JSON.parse(result.content[0].text);
+        expect(responseData.result).toBe("success");
+        expect(mockAppendSafeOutput).toHaveBeenCalledWith(expect.objectContaining({ type: "add_comment" }));
+      } finally {
+        global.context = savedContext;
+      }
+    });
+
+    it("should write entry when issue_comment fires on a PR (valid PR context for add_comment)", () => {
+      const savedContext = global.context;
+      global.context = {
+        ...global.context,
+        eventName: "issue_comment",
+        payload: { issue: { number: 7, pull_request: { url: "https://api.github.com/repos/test-owner/test-repo/pulls/7" } } },
+      };
+      try {
+        const result = handlers.addCommentHandler({ body: "A real comment body for this PR comment thread" });
+        expect(result.isError).toBeUndefined();
+        const responseData = JSON.parse(result.content[0].text);
+        expect(responseData.result).toBe("success");
+        expect(mockAppendSafeOutput).toHaveBeenCalledWith(expect.objectContaining({ type: "add_comment" }));
+      } finally {
+        global.context = savedContext;
+      }
+    });
+
+    it("should write entry when explicit item_number bypasses context check in non-issue/PR event", () => {
+      const savedContext = global.context;
+      global.context = { ...global.context, eventName: "push", payload: {} };
+      try {
+        const result = handlers.addCommentHandler({
+          body: "A real comment body that is substantive enough",
+          item_number: 42,
+        });
+        expect(result.isError).toBeUndefined();
+        const responseData = JSON.parse(result.content[0].text);
+        expect(responseData.result).toBe("success");
+        expect(mockAppendSafeOutput).toHaveBeenCalledWith(expect.objectContaining({ type: "add_comment", item_number: 42 }));
+      } finally {
+        global.context = savedContext;
+      }
+    });
+
+    it("should write entry on workflow_dispatch with issue aw_context", () => {
+      const savedContext = global.context;
+      global.context = {
+        ...global.context,
+        eventName: "workflow_dispatch",
+        payload: {
+          inputs: {
+            aw_context: JSON.stringify({
+              event_type: "issue_comment",
+              item_type: "issue",
+              item_number: 99,
+              repo: "test-owner/test-repo",
+            }),
+          },
+        },
+      };
+      try {
+        const result = handlers.addCommentHandler({ body: "Comment from dispatch with real content" });
+        expect(result.isError).toBeUndefined();
+        const responseData = JSON.parse(result.content[0].text);
+        expect(responseData.result).toBe("success");
+        expect(mockAppendSafeOutput).toHaveBeenCalledWith(expect.objectContaining({ type: "add_comment" }));
+      } finally {
+        global.context = savedContext;
+      }
+    });
+
+    it("should return intent error on workflow_dispatch with no event_name override", () => {
+      const savedContext = global.context;
+      global.context = {
+        ...global.context,
+        eventName: "workflow_dispatch",
+        payload: { inputs: {} }, // no event_name, no aw_context
+      };
+      try {
+        const result = handlers.addCommentHandler({ body: "A real comment body that is substantive" });
+        expect(result.isError).toBe(true);
+        const responseData = JSON.parse(result.content[0].text);
+        expect(responseData.result).toBe("error");
+        expect(responseData.error).toContain('"workflow_dispatch"');
+        expect(mockAppendSafeOutput).not.toHaveBeenCalled();
+      } finally {
+        global.context = savedContext;
+      }
     });
   });
 
@@ -2031,6 +2330,22 @@ describe("safe_outputs_handlers", () => {
       expect(() => handlers.submitPullRequestReviewHandler({ body: "LGTM", event: "comment" })).not.toThrow();
       expect(() => handlers.submitPullRequestReviewHandler({ body: "needs work", event: "request_changes" })).not.toThrow();
     });
+
+    it("should require explicit pull_request_number when submit_pull_request_review target is '*'", () => {
+      const wildcardHandlers = createHandlers(mockServer, mockAppendSafeOutput, {
+        submit_pull_request_review: {
+          target: "*",
+        },
+      });
+
+      const result = wildcardHandlers.submitPullRequestReviewHandler({ body: "LGTM", event: "COMMENT" });
+
+      expect(result.isError).toBe(true);
+      const responseData = JSON.parse(result.content[0].text);
+      expect(responseData.result).toBe("error");
+      expect(responseData.error).toContain("requires pull_request_number");
+      expect(mockAppendSafeOutput).not.toHaveBeenCalled();
+    });
   });
 
   describe("createPullRequestReviewCommentHandler", () => {
@@ -2058,6 +2373,23 @@ describe("safe_outputs_handlers", () => {
       // Counter was NOT incremented, so empty-body submit should still be rejected
       expect(() => handlers.submitPullRequestReviewHandler({ event: "COMMENT" })).toThrow(expect.objectContaining({ code: -32602, message: expect.stringContaining("review body is empty") }));
     });
+
+    it("should require explicit pull_request_number when review comment target is '*'", () => {
+      const wildcardHandlers = createHandlers(mockServer, mockAppendSafeOutput, {
+        create_pull_request_review_comment: {
+          target: "*",
+        },
+      });
+
+      const result = wildcardHandlers.createPullRequestReviewCommentHandler({ path: "src/foo.js", line: 5, body: "Consider renaming." });
+
+      expect(result.isError).toBe(true);
+      const responseData = JSON.parse(result.content[0].text);
+      expect(responseData.result).toBe("error");
+      expect(responseData.error).toContain("requires pull_request_number");
+      expect(mockAppendSafeOutput).not.toHaveBeenCalled();
+      expect(() => wildcardHandlers.submitPullRequestReviewHandler({ event: "COMMENT" })).toThrow(expect.objectContaining({ code: -32602, message: expect.stringContaining("review body is empty") }));
+    });
   });
 
   describe("updatePullRequestHandler", () => {
@@ -2073,6 +2405,22 @@ describe("safe_outputs_handlers", () => {
     it("should throw MCP error when called with null/undefined args", () => {
       expect(() => handlers.updatePullRequestHandler(null)).toThrow(expect.objectContaining({ code: -32602 }));
       expect(() => handlers.updatePullRequestHandler(undefined)).toThrow(expect.objectContaining({ code: -32602 }));
+    });
+
+    it("should require explicit pull_request_number when update_pull_request target is '*'", () => {
+      const wildcardHandlers = createHandlers(mockServer, mockAppendSafeOutput, {
+        update_pull_request: {
+          target: "*",
+        },
+      });
+
+      const result = wildcardHandlers.updatePullRequestHandler({ body: "Update the PR body." });
+
+      expect(result.isError).toBe(true);
+      const responseData = JSON.parse(result.content[0].text);
+      expect(responseData.result).toBe("error");
+      expect(responseData.error).toContain("requires pull_request_number");
+      expect(mockAppendSafeOutput).not.toHaveBeenCalled();
     });
 
     it("should throw MCP error when update_branch is explicitly false and no other fields", () => {
@@ -2092,35 +2440,59 @@ describe("safe_outputs_handlers", () => {
     });
 
     it("should write entry and return success when title is provided", () => {
-      const result = handlers.updatePullRequestHandler({ title: "New Title" });
-      expect(result).toHaveProperty("content");
-      const data = JSON.parse(result.content[0].text);
-      expect(data.result).toBe("success");
-      expect(mockAppendSafeOutput).toHaveBeenCalledWith(expect.objectContaining({ type: "update_pull_request", title: "New Title" }));
+      const savedContext = global.context;
+      global.context = { ...global.context, eventName: "pull_request", payload: { pull_request: { number: 7 } } };
+      try {
+        const result = handlers.updatePullRequestHandler({ title: "New Title" });
+        expect(result).toHaveProperty("content");
+        const data = JSON.parse(result.content[0].text);
+        expect(data.result).toBe("success");
+        expect(mockAppendSafeOutput).toHaveBeenCalledWith(expect.objectContaining({ type: "update_pull_request", title: "New Title" }));
+      } finally {
+        global.context = savedContext;
+      }
     });
 
     it("should write entry and return success when body is provided", () => {
-      const result = handlers.updatePullRequestHandler({ body: "Updated body" });
-      expect(result).toHaveProperty("content");
-      const data = JSON.parse(result.content[0].text);
-      expect(data.result).toBe("success");
-      expect(mockAppendSafeOutput).toHaveBeenCalledWith(expect.objectContaining({ type: "update_pull_request", body: "Updated body" }));
+      const savedContext = global.context;
+      global.context = { ...global.context, eventName: "pull_request", payload: { pull_request: { number: 7 } } };
+      try {
+        const result = handlers.updatePullRequestHandler({ body: "Updated body" });
+        expect(result).toHaveProperty("content");
+        const data = JSON.parse(result.content[0].text);
+        expect(data.result).toBe("success");
+        expect(mockAppendSafeOutput).toHaveBeenCalledWith(expect.objectContaining({ type: "update_pull_request", body: "Updated body" }));
+      } finally {
+        global.context = savedContext;
+      }
     });
 
     it("should write entry and return success when update_branch is true", () => {
-      const result = handlers.updatePullRequestHandler({ update_branch: true });
-      expect(result).toHaveProperty("content");
-      const data = JSON.parse(result.content[0].text);
-      expect(data.result).toBe("success");
-      expect(mockAppendSafeOutput).toHaveBeenCalledWith(expect.objectContaining({ type: "update_pull_request", update_branch: true }));
+      const savedContext = global.context;
+      global.context = { ...global.context, eventName: "pull_request", payload: { pull_request: { number: 7 } } };
+      try {
+        const result = handlers.updatePullRequestHandler({ update_branch: true });
+        expect(result).toHaveProperty("content");
+        const data = JSON.parse(result.content[0].text);
+        expect(data.result).toBe("success");
+        expect(mockAppendSafeOutput).toHaveBeenCalledWith(expect.objectContaining({ type: "update_pull_request", update_branch: true }));
+      } finally {
+        global.context = savedContext;
+      }
     });
 
     it("should write entry and return success when both title and body are provided", () => {
-      const result = handlers.updatePullRequestHandler({ title: "New Title", body: "New body" });
-      expect(result).toHaveProperty("content");
-      const data = JSON.parse(result.content[0].text);
-      expect(data.result).toBe("success");
-      expect(mockAppendSafeOutput).toHaveBeenCalledWith(expect.objectContaining({ type: "update_pull_request", title: "New Title", body: "New body" }));
+      const savedContext = global.context;
+      global.context = { ...global.context, eventName: "pull_request", payload: { pull_request: { number: 7 } } };
+      try {
+        const result = handlers.updatePullRequestHandler({ title: "New Title", body: "New body" });
+        expect(result).toHaveProperty("content");
+        const data = JSON.parse(result.content[0].text);
+        expect(data.result).toBe("success");
+        expect(mockAppendSafeOutput).toHaveBeenCalledWith(expect.objectContaining({ type: "update_pull_request", title: "New Title", body: "New body" }));
+      } finally {
+        global.context = savedContext;
+      }
     });
 
     it("error message should mention all required fields", () => {
@@ -2133,6 +2505,415 @@ describe("safe_outputs_handlers", () => {
         expect(err.message).toContain("'update_branch'");
       }
     });
+
+    it("should return intent error when target is triggering (default) and not in PR context", () => {
+      const savedContext = global.context;
+      global.context = { ...global.context, eventName: "push", payload: {} };
+      try {
+        const result = handlers.updatePullRequestHandler({ title: "Update title" });
+        expect(result.isError).toBe(true);
+        const responseData = JSON.parse(result.content[0].text);
+        expect(responseData.result).toBe("error");
+        expect(responseData.error).toContain("update_pull_request");
+        expect(responseData.error).toContain('"push"');
+        expect(mockAppendSafeOutput).not.toHaveBeenCalled();
+      } finally {
+        global.context = savedContext;
+      }
+    });
+
+    it("should return intent error on schedule event with default target", () => {
+      const savedContext = global.context;
+      global.context = { ...global.context, eventName: "schedule", payload: {} };
+      try {
+        const result = handlers.updatePullRequestHandler({ body: "Report" });
+        expect(result.isError).toBe(true);
+        const responseData = JSON.parse(result.content[0].text);
+        expect(responseData.result).toBe("error");
+        expect(responseData.error).toContain('"schedule"');
+        expect(responseData.error).toContain("create_discussion");
+        expect(mockAppendSafeOutput).not.toHaveBeenCalled();
+      } finally {
+        global.context = savedContext;
+      }
+    });
+
+    it("should write entry and return success when target is '*' regardless of non-PR context", () => {
+      // global.context has eventName: "push" (not a PR context) but target is '*'
+      const wildcardHandlers = createHandlers(mockServer, mockAppendSafeOutput, {
+        "update-pull-request": { target: "*" },
+      });
+      const result = wildcardHandlers.updatePullRequestHandler({ pull_request_number: 7, title: "New Title" });
+      expect(result.isError).toBeUndefined();
+      const responseData = JSON.parse(result.content[0].text);
+      expect(responseData.result).toBe("success");
+      expect(mockAppendSafeOutput).toHaveBeenCalledWith(expect.objectContaining({ type: "update_pull_request", pull_request_number: 7, title: "New Title" }));
+    });
+
+    it("should write entry and return success on workflow_dispatch with PR aw_context", () => {
+      const savedContext = global.context;
+      global.context = {
+        ...global.context,
+        eventName: "workflow_dispatch",
+        payload: {
+          inputs: {
+            aw_context: JSON.stringify({
+              event_type: "pull_request",
+              item_type: "pull_request",
+              item_number: 7,
+              repo: "test-owner/test-repo",
+            }),
+          },
+        },
+      };
+      try {
+        const result = handlers.updatePullRequestHandler({ title: "PR update from dispatch" });
+        expect(result.isError).toBeUndefined();
+        const responseData = JSON.parse(result.content[0].text);
+        expect(responseData.result).toBe("success");
+        expect(mockAppendSafeOutput).toHaveBeenCalledWith(expect.objectContaining({ type: "update_pull_request" }));
+      } finally {
+        global.context = savedContext;
+      }
+    });
+
+    it("should return intent error on workflow_dispatch with no event_name override", () => {
+      const savedContext = global.context;
+      global.context = {
+        ...global.context,
+        eventName: "workflow_dispatch",
+        payload: { inputs: {} }, // no event_name, no aw_context
+      };
+      try {
+        const result = handlers.updatePullRequestHandler({ title: "No context title" });
+        expect(result.isError).toBe(true);
+        const responseData = JSON.parse(result.content[0].text);
+        expect(responseData.result).toBe("error");
+        expect(responseData.error).toContain('"workflow_dispatch"');
+        expect(mockAppendSafeOutput).not.toHaveBeenCalled();
+      } finally {
+        global.context = savedContext;
+      }
+    });
+
+    it("should write entry when issue_comment fires on a PR (PR context for update_pull_request)", () => {
+      const savedContext = global.context;
+      global.context = {
+        ...global.context,
+        eventName: "issue_comment",
+        payload: { issue: { number: 7, pull_request: { url: "https://api.github.com/repos/test-owner/test-repo/pulls/7" } } },
+      };
+      try {
+        const result = handlers.updatePullRequestHandler({ title: "PR update from issue_comment" });
+        expect(result.isError).toBeUndefined();
+        const responseData = JSON.parse(result.content[0].text);
+        expect(responseData.result).toBe("success");
+        expect(mockAppendSafeOutput).toHaveBeenCalledWith(expect.objectContaining({ type: "update_pull_request" }));
+      } finally {
+        global.context = savedContext;
+      }
+    });
+  });
+
+  describe("updateIssueHandler", () => {
+    it("should return intent error when target is triggering (default) and not in issue context", () => {
+      // global.context has eventName: "push" (not an issue context)
+      const result = handlers.updateIssueHandler({ body: "Updated body" });
+      expect(result.isError).toBe(true);
+      const responseData = JSON.parse(result.content[0].text);
+      expect(responseData.result).toBe("error");
+      expect(responseData.error).toContain("update_issue");
+      expect(responseData.error).toContain('"push"');
+      expect(mockAppendSafeOutput).not.toHaveBeenCalled();
+    });
+
+    it("should return intent error on schedule event with default target", () => {
+      const savedContext = global.context;
+      global.context = { ...global.context, eventName: "schedule", payload: {} };
+      try {
+        const result = handlers.updateIssueHandler({ body: "Report" });
+        expect(result.isError).toBe(true);
+        const responseData = JSON.parse(result.content[0].text);
+        expect(responseData.result).toBe("error");
+        expect(responseData.error).toContain('"schedule"');
+        expect(responseData.error).toContain("create_discussion");
+        expect(mockAppendSafeOutput).not.toHaveBeenCalled();
+      } finally {
+        global.context = savedContext;
+      }
+    });
+
+    it("should write entry and return success when in issue context with default target", () => {
+      const savedContext = global.context;
+      global.context = { ...global.context, eventName: "issues", payload: { issue: { number: 42 } } };
+      try {
+        const result = handlers.updateIssueHandler({ body: "Updated body" });
+        expect(result.isError).toBeUndefined();
+        const responseData = JSON.parse(result.content[0].text);
+        expect(responseData.result).toBe("success");
+        expect(mockAppendSafeOutput).toHaveBeenCalledWith(expect.objectContaining({ type: "update_issue", body: "Updated body" }));
+      } finally {
+        global.context = savedContext;
+      }
+    });
+
+    it("should write entry and return success when target is '*' regardless of non-issue context", () => {
+      // global.context has eventName: "push" (not an issue context) but target is '*'
+      const wildcardHandlers = createHandlers(mockServer, mockAppendSafeOutput, {
+        "update-issue": { target: "*" },
+      });
+      const result = wildcardHandlers.updateIssueHandler({ issue_number: 42, body: "Updated body" });
+      expect(result.isError).toBeUndefined();
+      const responseData = JSON.parse(result.content[0].text);
+      expect(responseData.result).toBe("success");
+      expect(mockAppendSafeOutput).toHaveBeenCalledWith(expect.objectContaining({ type: "update_issue", issue_number: 42, body: "Updated body" }));
+    });
+
+    it("should write entry and return success on workflow_dispatch with issue aw_context", () => {
+      const savedContext = global.context;
+      global.context = {
+        ...global.context,
+        eventName: "workflow_dispatch",
+        payload: {
+          inputs: {
+            aw_context: JSON.stringify({
+              event_type: "issue_comment",
+              item_type: "issue",
+              item_number: 99,
+              repo: "test-owner/test-repo",
+            }),
+          },
+        },
+      };
+      try {
+        const result = handlers.updateIssueHandler({ body: "Issue update from dispatch" });
+        expect(result.isError).toBeUndefined();
+        const responseData = JSON.parse(result.content[0].text);
+        expect(responseData.result).toBe("success");
+        expect(mockAppendSafeOutput).toHaveBeenCalledWith(expect.objectContaining({ type: "update_issue" }));
+      } finally {
+        global.context = savedContext;
+      }
+    });
+
+    it("should return intent error for issue_comment on a PR (not issue context)", () => {
+      const savedContext = global.context;
+      global.context = {
+        ...global.context,
+        eventName: "issue_comment",
+        payload: { issue: { number: 7, pull_request: { url: "https://api.github.com/repos/test-owner/test-repo/pulls/7" } } },
+      };
+      try {
+        const result = handlers.updateIssueHandler({ body: "Update body" });
+        expect(result.isError).toBe(true);
+        const data = JSON.parse(result.content[0].text);
+        expect(data.result).toBe("error");
+        expect(data.error).toContain("issue context");
+        expect(mockAppendSafeOutput).not.toHaveBeenCalled();
+      } finally {
+        global.context = savedContext;
+      }
+    });
+
+    it("should return intent error on workflow_dispatch with no event_name override", () => {
+      const savedContext = global.context;
+      global.context = {
+        ...global.context,
+        eventName: "workflow_dispatch",
+        payload: { inputs: {} }, // no event_name, no aw_context
+      };
+      try {
+        const result = handlers.updateIssueHandler({ body: "Issue update no context" });
+        expect(result.isError).toBe(true);
+        const responseData = JSON.parse(result.content[0].text);
+        expect(responseData.result).toBe("error");
+        expect(responseData.error).toContain('"workflow_dispatch"');
+        expect(mockAppendSafeOutput).not.toHaveBeenCalled();
+      } finally {
+        global.context = savedContext;
+      }
+    });
+  });
+});
+
+describe("per-type max enforcement (MCE4 dual enforcement)", () => {
+  let mockServer;
+  let mockAppendSafeOutput;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockServer = { debug: vi.fn() };
+    mockAppendSafeOutput = vi.fn();
+  });
+
+  it("allows calls up to the configured max and rejects the (max+1)th call via defaultHandler", () => {
+    const h = createHandlers(mockServer, mockAppendSafeOutput, {
+      add_labels: { max: 2 },
+    });
+
+    // First two calls succeed
+    expect(h.defaultHandler("add_labels")({ labels: ["approved"] })).not.toHaveProperty("isError");
+    expect(h.defaultHandler("add_labels")({ labels: ["approved"] })).not.toHaveProperty("isError");
+    expect(mockAppendSafeOutput).toHaveBeenCalledTimes(2);
+
+    // Third call must throw E002
+    expect(() => h.defaultHandler("add_labels")({ labels: ["approved"] })).toThrow(
+      expect.objectContaining({
+        code: -32602,
+        message: expect.stringContaining("E002"),
+      })
+    );
+    // No additional append after limit
+    expect(mockAppendSafeOutput).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects immediately when max is 0 and config uses hyphen-keyed type (key normalisation)", () => {
+    // Ensure getSafeOutputsToolConfig's hyphen→underscore lookup works for max checks
+    const h = createHandlers(mockServer, mockAppendSafeOutput, {
+      "add-labels": { max: 1 },
+    });
+
+    h.defaultHandler("add_labels")({ labels: ["ok"] });
+    expect(mockAppendSafeOutput).toHaveBeenCalledTimes(1);
+
+    expect(() => h.defaultHandler("add_labels")({ labels: ["ok"] })).toThrow(expect.objectContaining({ code: -32602, message: expect.stringContaining("E002") }));
+    expect(mockAppendSafeOutput).toHaveBeenCalledTimes(1);
+  });
+
+  it("enforces max for addCommentHandler", () => {
+    const h = createHandlers(mockServer, mockAppendSafeOutput, {
+      add_comment: { max: 1 },
+    });
+
+    global.context = { repo: { owner: "o", repo: "r" }, eventName: "issues", payload: { issue: { number: 1 } } };
+    try {
+      const ok = h.addCommentHandler({ body: "first comment", item_number: 1 });
+      expect(ok).not.toHaveProperty("isError");
+      expect(mockAppendSafeOutput).toHaveBeenCalledTimes(1);
+
+      expect(() => h.addCommentHandler({ body: "second comment", item_number: 2 })).toThrow(expect.objectContaining({ code: -32602, message: expect.stringContaining("E002") }));
+      expect(mockAppendSafeOutput).toHaveBeenCalledTimes(1);
+    } finally {
+      global.context = { repo: { owner: "test-owner", repo: "test-repo" }, eventName: "push", payload: {} };
+    }
+  });
+
+  it("independent per-type budgets: exceeding add_comment limit does not affect add_labels", () => {
+    const h = createHandlers(mockServer, mockAppendSafeOutput, {
+      add_comment: { max: 1 },
+      add_labels: { max: 3 },
+    });
+
+    global.context = { repo: { owner: "o", repo: "r" }, eventName: "issues", payload: { issue: { number: 1 } } };
+    try {
+      h.addCommentHandler({ body: "first comment", item_number: 1 });
+      expect(() => h.addCommentHandler({ body: "second comment", item_number: 2 })).toThrow(expect.objectContaining({ code: -32602, message: expect.stringContaining("E002") }));
+
+      // add_labels budget is separate — all 3 calls should succeed
+      expect(h.defaultHandler("add_labels")({ labels: ["a"] })).not.toHaveProperty("isError");
+      expect(h.defaultHandler("add_labels")({ labels: ["b"] })).not.toHaveProperty("isError");
+      expect(h.defaultHandler("add_labels")({ labels: ["c"] })).not.toHaveProperty("isError");
+
+      // 4th add_labels call must fail
+      expect(() => h.defaultHandler("add_labels")({ labels: ["d"] })).toThrow(expect.objectContaining({ code: -32602, message: expect.stringContaining("E002") }));
+    } finally {
+      global.context = { repo: { owner: "test-owner", repo: "test-repo" }, eventName: "push", payload: {} };
+    }
+  });
+
+  it("does not enforce when max is -1 (unlimited)", () => {
+    const h = createHandlers(mockServer, mockAppendSafeOutput, {
+      add_labels: { max: -1 },
+    });
+
+    for (let i = 0; i < 20; i++) {
+      expect(h.defaultHandler("add_labels")({ labels: ["ok"] })).not.toHaveProperty("isError");
+    }
+    expect(mockAppendSafeOutput).toHaveBeenCalledTimes(20);
+  });
+
+  it("does not enforce when max is not explicitly configured", () => {
+    // Only target is set — no max → no invocation-time limit
+    const h = createHandlers(mockServer, mockAppendSafeOutput, {
+      add_labels: { target: "*" },
+    });
+
+    for (let i = 0; i < 5; i++) {
+      expect(h.defaultHandler("add_labels")({ labels: ["ok"] })).not.toHaveProperty("isError");
+    }
+    expect(mockAppendSafeOutput).toHaveBeenCalledTimes(5);
+  });
+
+  it("does not enforce when config is empty (no safe-outputs config)", () => {
+    const h = createHandlers(mockServer, mockAppendSafeOutput);
+
+    for (let i = 0; i < 5; i++) {
+      expect(h.defaultHandler("add_labels")({ labels: ["ok"] })).not.toHaveProperty("isError");
+    }
+    expect(mockAppendSafeOutput).toHaveBeenCalledTimes(5);
+  });
+
+  it("error message includes type, current count, and limit", () => {
+    const h = createHandlers(mockServer, mockAppendSafeOutput, {
+      add_labels: { max: 3 },
+    });
+
+    h.defaultHandler("add_labels")({ labels: ["a"] });
+    h.defaultHandler("add_labels")({ labels: ["b"] });
+    h.defaultHandler("add_labels")({ labels: ["c"] });
+
+    let thrown;
+    try {
+      h.defaultHandler("add_labels")({ labels: ["d"] });
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect(thrown).toBeDefined();
+    expect(thrown.code).toBe(-32602);
+    expect(thrown.message).toContain("add_labels");
+    expect(thrown.message).toContain("3 of 3");
+    expect(thrown.data).toMatchObject({
+      constraint: "max",
+      type: "add_labels",
+      limit: 3,
+    });
+    expect(thrown.data.guidance).toContain("add_labels");
+  });
+
+  it("counter does not increment when append throws (write error)", () => {
+    const h = createHandlers(mockServer, mockAppendSafeOutput, {
+      add_labels: { max: 2 },
+    });
+
+    // First call succeeds
+    h.defaultHandler("add_labels")({ labels: ["ok"] });
+    expect(mockAppendSafeOutput).toHaveBeenCalledTimes(1);
+
+    // Second call: append throws a write error
+    mockAppendSafeOutput.mockImplementationOnce(() => {
+      throw new Error("disk write error");
+    });
+    expect(() => h.defaultHandler("add_labels")({ labels: ["fail"] })).toThrow("disk write error");
+
+    // Counter is still 1 (not 2) because the failed write shouldn't count
+    // Third call should succeed (not hit limit)
+    expect(h.defaultHandler("add_labels")({ labels: ["ok2"] })).not.toHaveProperty("isError");
+    expect(mockAppendSafeOutput).toHaveBeenCalledTimes(3); // call 1 + (failed) call 2 + call 3
+  });
+
+  it("each createHandlers() call gets a fresh independent counter", () => {
+    const config = { add_labels: { max: 1 } };
+
+    const h1 = createHandlers(mockServer, mockAppendSafeOutput, config);
+    const h2 = createHandlers(mockServer, mockAppendSafeOutput, config);
+
+    h1.defaultHandler("add_labels")({ labels: ["a"] });
+    // h1's budget is now exhausted — must throw
+    expect(() => h1.defaultHandler("add_labels")({ labels: ["b"] })).toThrow(expect.objectContaining({ code: -32602 }));
+
+    // h2 has its own fresh counter — should still allow 1 call
+    expect(h2.defaultHandler("add_labels")({ labels: ["a"] })).not.toHaveProperty("isError");
   });
 });
 

@@ -10,6 +10,7 @@ This page is the primary reference for pull-request-focused safe outputs:
 - [`create-pull-request`](#pull-request-creation-create-pull-request)
 - [`update-pull-request`](#pull-request-updates-update-pull-request)
 - [`close-pull-request`](#close-pull-request-close-pull-request)
+- [`merge-pull-request`](#merge-pull-request-merge-pull-request) (experimental)
 - [`create-pull-request-review-comment`](#pr-review-comments-create-pull-request-review-comment)
 - [`submit-pull-request-review`](#submit-pr-review-submit-pull-request-review)
 - [`reply-to-pull-request-review-comment`](#reply-to-pr-review-comment-reply-to-pull-request-review-comment)
@@ -48,6 +49,7 @@ safe-outputs:
       - release/*
     fallback-as-issue: false      # disable issue fallback (default: true)
     auto-close-issue: false       # don't auto-add "Fixes #N" to PR description (default: true)
+    normalize-closing-keywords: true # strip backticks around recognized issue-closing keywords in PR body text
     preserve-branch-name: true    # omit random salt suffix from branch name (default: false)
     recreate-ref: true            # force-recreate remote branch when it already exists (requires preserve-branch-name; default: false)
     excluded-files:               # strip these files from the patch entirely
@@ -81,6 +83,7 @@ By default a random hex suffix is appended to the agent-provided branch name to 
 
 - `draft` is a **policy**, not a default — the agent cannot override it at runtime.
 - `auto-close-issue` (default `true`) appends `Fixes #N` to the PR description when the workflow is triggered from an issue. Set to `false` for partial-work or multi-PR flows.
+- `normalize-closing-keywords` strips wrapping backticks from recognized issue-closing keywords in the PR body (for example, `` `Closes #123` `` → `Closes #123`).
 - When `create-pull-request` is configured, git commands (`checkout`, `branch`, `switch`, `add`, `rm`, `commit`, `merge`) are automatically enabled.
 - PRs do not trigger CI by default. See [Triggering CI](/gh-aw/reference/triggering-ci/).
 
@@ -97,7 +100,7 @@ If the base branch advances between agent start and `safe_outputs` apply, the PR
 An older **patch transport** (`git format-patch` / `git am --3way`) is used when bundle data is unavailable. `--3way` resolves cleanly against an updated base when there are no conflicts; if it cannot, the patch is applied at the agent's original base commit and the PR UI shows the conflicts for manual resolution.
 
 :::note[Cross-repo targets]
-When `target-repo` names a specific repository, `safe_outputs` checks out and applies changes to that single repository. When `target-repo: "*"` is used, the agent chooses the target repository at runtime and the `safe_outputs` job checks out **all** repositories listed in `checkout:` frontmatter into subdirectories (mirroring the agent job layout), enabling pull requests to multiple repositories in a single run.
+The `safe_outputs` job always mirrors the agent job's checkout layout. When a `checkout:` entry places a repository in a subdirectory (a `path:` is set), `safe_outputs` checks out **every** repository to the same location the agent used — the workflow repository at the workspace root plus each cross-repo checkout at its `path:` — regardless of whether `target-repo` names a specific repository or the wildcard `"*"`. This lets a specific `target-repo` (and the two-or-more cross-repo case) operate against an identical layout. When the target repository is checked out at the workspace root (no `path:`), it is checked out there in both jobs.
 :::
 
 ## Pull Request Updates (`update-pull-request:`)
@@ -143,6 +146,38 @@ safe-outputs:
     target-repo: "owner/repo"         # cross-repository
     github-token: ${{ secrets.SOME_CUSTOM_TOKEN }} # optional custom token for permissions
 ```
+
+## Merge Pull Request (`merge-pull-request:`)
+
+:::caution[Experimental]
+`merge-pull-request` is an experimental safe output. `gh aw compile` emits an experimental feature warning when a workflow uses it. The merge is blocked unless every configured policy gate passes; merges to the repository default branch are always refused.
+:::
+
+Merges a pull request only after configured policy gates pass — status checks, review decision, unresolved review threads, label and branch constraints, and GitHub mergeability.
+
+```yaml wrap
+safe-outputs:
+  merge-pull-request:
+    max: 1                            # max merges per run (default: 1, range: 1-10)
+    required-labels: [ready-to-merge] # ALL listed labels must be present on the PR
+    required-title-prefix: "[bot] "   # only merge PRs whose title starts with this prefix
+    allowed-branches: ["feature/*"]   # glob patterns for the PR's source branch
+    target: "triggering"              # "triggering" (default, current PR) or "*" (any PR with pull_request_number)
+    target-repo: "owner/repo"         # cross-repository target
+    allowed-repos: ["org/other-repo"] # additional repositories the agent can merge into
+    staged: false                     # if true, evaluate gates and emit preview results without performing the merge
+    github-token: ${{ secrets.SOME_CUSTOM_TOKEN }} # optional custom token for permissions
+```
+
+**Target**: `"triggering"` (requires a PR event) or `"*"` (the agent supplies `pull_request_number` in the tool call). When `target: "*"` is used with cross-repository configuration, the agent may also supply `repo` (in `owner/repo` format); the value must match `target-repo` or appear in `allowed-repos`.
+
+**Merge method**: The agent selects `merge`, `squash`, or `rebase` per tool call. The base branch is taken from the pull request; merges to the repository default branch are refused by this safe output type.
+
+**Gate semantics**: The handler validates mergeability (not draft, no conflicts), required status checks, the GitHub review decision, unresolved review thread gating, `required-labels`, `required-title-prefix`, and `allowed-branches`. If any gate fails, the merge is skipped and the reason is reported. Idempotent: already-merged PRs return success.
+
+**Staged mode**: Setting `staged: true` runs all gate checks and emits a preview result without calling the GitHub merge API. Use this to validate policy in dry-run scenarios.
+
+See [Cross-Repository Operations](/gh-aw/reference/cross-repository/) for `target-repo`, `allowed-repos`, and authentication configuration. See the [Safe Outputs Specification](/gh-aw/specs/safe-outputs-specification/#type-merge_pull_request) for the complete schema and operational semantics.
 
 ## PR Review Comments (`create-pull-request-review-comment:`)
 
@@ -317,6 +352,22 @@ The `path:` field is required so the agent knows where the target repository is 
 See [Cross-Repository Operations](/gh-aw/reference/cross-repository/) for a complete example and documentation on `target-repo`, `allowed-repos`, and cross-repository authentication.
 
 Like `create-pull-request`, pushes with GitHub Agentic Workflows do not trigger CI. See [Triggering CI](/gh-aw/reference/triggering-ci/) for how to enable automatic CI triggers.
+
+### Checkout token for git operations
+
+`create-pull-request` and `push-to-pull-request-branch` run their git operations (fetch/push) against a repository that the `safe_outputs` job checks out with credentials persisted in `.git/config`. A **single** token is persisted into that checkout, resolved with this precedence:
+
+1. `create-pull-request.github-token`
+2. `push-to-pull-request-branch.github-token`
+3. The `safe-outputs.github-app` minted token (when a GitHub App is configured)
+4. `safe-outputs.github-token`
+5. The default `${{ secrets.GH_AW_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}`
+
+Because only one token can govern the shared checkout, **if you configure both `create-pull-request` and `push-to-pull-request-branch` for the same repository, give them the same token.** If they specify different `github-token` values, the higher-precedence one wins for the checkout, so the other output's git operations run with a token you did not intend. Set the token once at `safe-outputs.github-token` (or `safe-outputs.github-app`) and let both outputs inherit it, or set identical `github-token` values on each.
+
+:::note
+This applies to the git checkout used by the handlers' `fetch`/`push`. The GitHub API calls each handler makes still honor that handler's own `github-token` precedence.
+:::
 
 ## Add Reviewer (`add-reviewer:`)
 

@@ -16,10 +16,12 @@ import (
 	"strings"
 
 	"github.com/github/gh-aw/pkg/constants"
+	"github.com/github/gh-aw/pkg/setutil"
+
+	"github.com/goccy/go-yaml"
 
 	"github.com/github/gh-aw/pkg/console"
 	"github.com/github/gh-aw/pkg/logger"
-	"github.com/goccy/go-yaml"
 )
 
 var dependabotLog = logger.New("workflow:dependabot")
@@ -75,12 +77,14 @@ func (c *Compiler) GenerateDependabotManifests(workflowDataList []*WorkflowData,
 	dependabotLog.Print("Starting Dependabot manifest generation")
 
 	// Track which ecosystems have dependencies
-	ecosystems := make(map[string]bool)
+	ecosystems := make(map[string]struct {
+	})
 
 	// Collect npm dependencies
 	npmDeps := c.collectNpmDependencies(workflowDataList)
 	if len(npmDeps) > 0 {
-		ecosystems["npm"] = true
+		ecosystems["npm"] = struct {
+		}{}
 		dependabotLog.Printf("Found %d unique npm dependencies", len(npmDeps))
 		if c.verbose {
 			fmt.Fprintln(os.Stderr, console.FormatInfoMessage(fmt.Sprintf("Found %d npm dependencies in workflows", len(npmDeps))))
@@ -109,7 +113,8 @@ func (c *Compiler) GenerateDependabotManifests(workflowDataList []*WorkflowData,
 	// Collect pip dependencies
 	pipDeps := c.collectPipDependencies(workflowDataList)
 	if len(pipDeps) > 0 {
-		ecosystems["pip"] = true
+		ecosystems["pip"] = struct {
+		}{}
 		dependabotLog.Printf("Found %d unique pip dependencies", len(pipDeps))
 		if c.verbose {
 			fmt.Fprintln(os.Stderr, console.FormatInfoMessage(fmt.Sprintf("Found %d pip dependencies in workflows", len(pipDeps))))
@@ -129,7 +134,8 @@ func (c *Compiler) GenerateDependabotManifests(workflowDataList []*WorkflowData,
 	// Collect go dependencies
 	goDeps := c.collectGoDependencies(workflowDataList)
 	if len(goDeps) > 0 {
-		ecosystems["gomod"] = true
+		ecosystems["gomod"] = struct {
+		}{}
 		dependabotLog.Printf("Found %d unique go dependencies", len(goDeps))
 		if c.verbose {
 			fmt.Fprintln(os.Stderr, console.FormatInfoMessage(fmt.Sprintf("Found %d go dependencies in workflows", len(goDeps))))
@@ -360,7 +366,8 @@ func (c *Compiler) generatePackageLock(workflowDir string) error {
 }
 
 // generateDependabotConfig creates or updates .github/dependabot.yml
-func (c *Compiler) generateDependabotConfig(path string, ecosystems map[string]bool, forceOverwrite bool) error {
+func (c *Compiler) generateDependabotConfig(path string, ecosystems map[string]struct {
+}, forceOverwrite bool) error {
 	dependabotLog.Printf("Generating dependabot.yml at %s", path)
 
 	var config DependabotConfig
@@ -483,7 +490,8 @@ func (c *Compiler) ReconcileManagedDependabotIgnores(path string) error {
 			continue
 		}
 
-		managedPresent := make(map[string]bool, len(managedPatterns))
+		managedPresent := make(map[string]struct {
+		}, len(managedPatterns))
 		for _, ignoreEntryAny := range ignoreEntries {
 			ignoreEntryMap, ok := dependabotToStringAnyMap(ignoreEntryAny)
 			if !ok {
@@ -496,8 +504,9 @@ func (c *Compiler) ReconcileManagedDependabotIgnores(path string) error {
 
 			for _, pattern := range managedPatterns {
 				if dependencyName == pattern {
-					managedPresent[pattern] = true
-					if !managedPatternsWithComment[pattern] {
+					managedPresent[pattern] = struct {
+					}{}
+					if !setutil.Contains(managedPatternsWithComment, pattern) {
 						changed = true
 					}
 				}
@@ -505,7 +514,7 @@ func (c *Compiler) ReconcileManagedDependabotIgnores(path string) error {
 		}
 
 		for _, pattern := range managedPatterns {
-			if managedPresent[pattern] {
+			if setutil.Contains(managedPresent, pattern) {
 				continue
 			}
 			ignoreEntries = append(ignoreEntries, map[string]any{"dependency-name": pattern})
@@ -617,15 +626,18 @@ func isYAMLNullOrEmptyScalar(value any) bool {
 	return trimmed == "" || strings.EqualFold(trimmed, "null") || trimmed == "~"
 }
 
-func managedPatternsWithInlineComment(content string, managedPatterns []string) map[string]bool {
-	result := make(map[string]bool, len(managedPatterns))
+func managedPatternsWithInlineComment(content string, managedPatterns []string) map[string]struct {
+} {
+	result := make(map[string]struct {
+	}, len(managedPatterns))
 	for line := range strings.SplitSeq(content, "\n") {
 		if !strings.Contains(line, "dependency-name:") || !strings.Contains(line, managedDependabotIgnoreComment) {
 			continue
 		}
 		for _, pattern := range managedPatterns {
 			if strings.Contains(line, pattern) {
-				result[pattern] = true
+				result[pattern] = struct {
+				}{}
 			}
 		}
 	}

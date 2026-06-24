@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/github/gh-aw/pkg/logger"
+	"github.com/github/gh-aw/pkg/setutil"
 )
 
 var schemaErrorsLog = logger.New("parser:schema_errors")
@@ -175,11 +176,13 @@ func synthesizeOneOfTypeConflictMessage(lines []string) string {
 	}
 
 	// Deduplicate expected types (e.g., multiple "object" branches in oneOf)
-	seen := make(map[string]bool)
+	seen := make(map[string]struct {
+	})
 	var uniqueWantTypes []string
 	for _, t := range wantTypes {
-		if !seen[t] {
-			seen[t] = true
+		if !setutil.Contains(seen, t) {
+			seen[t] = struct {
+			}{}
 			uniqueWantTypes = append(uniqueWantTypes, t)
 		}
 	}
@@ -304,21 +307,28 @@ func findFrontmatterBounds(lines []string) (startIdx int, endIdx int, frontmatte
 // of the valid values / children for that field. Used to append helpful hints when an
 // additionalProperties error occurs on these fields so users quickly know what is allowed.
 //
-// The permissions scope list mirrors the properties defined in main_workflow_schema.json
-// under permissions.oneOf[1].properties. Update this list when the schema changes.
+// Both /permissions and /on/permissions mirror #/$defs/github_actions_permissions in
+// main_workflow_schema.json. Update this list when the schema changes.
 var knownFieldValidValues = map[string]string{
-	// This list mirrors permissions.oneOf[1].properties in main_workflow_schema.json.
+	// Both entries mirror $defs/github_actions_permissions in main_workflow_schema.json.
 	// Update both when the schema changes.
-	"/permissions": "Valid permission scopes: actions, all, attestations, checks, copilot-requests, contents, deployments, discussions, id-token, issues, metadata, models, organization-projects, packages, pages, pull-requests, repository-projects, security-events, statuses, vulnerability-alerts",
+	"/permissions":    "Valid permission scopes: actions, all, attestations, checks, copilot-requests, contents, deployments, discussions, id-token, issues, metadata, models, organization-projects, packages, pages, pull-requests, repository-projects, security-events, statuses, vulnerability-alerts",
+	"/on/permissions": "Valid permission scopes: actions, all, attestations, checks, copilot-requests, contents, deployments, discussions, id-token, issues, metadata, models, organization-projects, packages, pages, pull-requests, repository-projects, security-events, statuses, vulnerability-alerts",
 }
 
 // knownFieldScopes maps well-known JSON schema paths to a slice of valid scope names.
 // This enables spell-check ("Did you mean?") suggestions for unknown-property errors.
 //
-// The permissions scope list mirrors permissions.oneOf[1].properties in main_workflow_schema.json.
-// Update both when the schema changes.
+// Both /permissions and /on/permissions mirror #/$defs/github_actions_permissions in
+// main_workflow_schema.json. Update this list when the schema changes.
 var knownFieldScopes = map[string][]string{
 	"/permissions": {
+		"actions", "all", "attestations", "checks", "copilot-requests", "contents", "deployments",
+		"discussions", "id-token", "issues", "metadata", "models",
+		"organization-projects", "packages", "pages", "pull-requests",
+		"repository-projects", "security-events", "statuses", "vulnerability-alerts",
+	},
+	"/on/permissions": {
 		"actions", "all", "attestations", "checks", "copilot-requests", "contents", "deployments",
 		"discussions", "id-token", "issues", "metadata", "models",
 		"organization-projects", "packages", "pages", "pull-requests",
@@ -328,7 +338,8 @@ var knownFieldScopes = map[string][]string{
 
 // knownFieldDocs maps well-known JSON schema paths to documentation URLs.
 var knownFieldDocs = map[string]string{
-	"/permissions": "https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/controlling-permissions-for-github_token",
+	"/permissions":    "https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/controlling-permissions-for-github_token",
+	"/on/permissions": "https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/controlling-permissions-for-github_token",
 }
 
 // unknownPropertyPattern extracts the property name(s) from a rewritten "Unknown property(ies):" message.
@@ -412,11 +423,13 @@ func uniqueClosestScopeSuggestions(unknownProps []string, scopes []string) []str
 		}
 		allSuggestions = append(allSuggestions, FindClosestMatches(prop, scopes, maxClosestMatches)...)
 	}
-	seen := make(map[string]bool)
+	seen := make(map[string]struct {
+	})
 	var unique []string
 	for _, s := range allSuggestions {
-		if !seen[s] {
-			seen[s] = true
+		if !setutil.Contains(seen, s) {
+			seen[s] = struct {
+			}{}
 			unique = append(unique, s)
 		}
 	}

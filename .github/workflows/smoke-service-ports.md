@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "🧪"
 description: Smoke test to validate --allow-host-service-ports with Redis service container
 on:
@@ -45,6 +46,8 @@ safe-outputs:
 timeout-minutes: 5
 imports:
   - shared/otlp.md
+features:
+  gh-aw-detection: true
 ---
 
 # Smoke Test: Service Ports (Redis)

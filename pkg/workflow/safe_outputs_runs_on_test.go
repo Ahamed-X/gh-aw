@@ -48,6 +48,38 @@ safe-outputs:
 This is a test workflow.`,
 			expectedRunsOn: "runs-on: windows-latest",
 		},
+		{
+			name: "custom runs-on array",
+			frontmatter: `---
+on: push
+safe-outputs:
+  create-issue:
+    title-prefix: "[ai] "
+  runs-on: [self-hosted, linux, x64]
+---
+
+# Test Workflow
+
+This is a test workflow.`,
+			expectedRunsOn: "runs-on:\n      - self-hosted\n      - linux\n      - x64",
+		},
+		{
+			name: "custom runs-on object",
+			frontmatter: `---
+on: push
+safe-outputs:
+  create-issue:
+    title-prefix: "[ai] "
+  runs-on:
+    group: runner-group
+    labels: [linux, x64]
+---
+
+# Test Workflow
+
+This is a test workflow.`,
+			expectedRunsOn: "runs-on:\n      group: runner-group\n      labels:\n        - linux\n        - x64",
+		},
 	}
 
 	for _, tt := range tests {
@@ -263,13 +295,16 @@ This is a test workflow.`,
 			frontmatter: `---
 on: push
 runs-on-slim: [self-hosted, ubuntu2404, x64, host]
+safe-outputs:
+  create-issue:
+    title-prefix: "[ai] "
 ---
 
 # Test Workflow
 
 This is a test workflow.`,
-			expectedRunsOn:   "runs-on:\n    - self-hosted\n    - ubuntu2404\n    - x64\n    - host",
-			checkJobPatterns: []string{"\n  activation:"},
+			expectedRunsOn:   "runs-on:\n      - self-hosted\n      - ubuntu2404\n      - x64\n      - host",
+			checkJobPatterns: []string{"\n  activation:", "\n  safe_outputs:"},
 		},
 		{
 			name: "runs-on-slim supports group and labels object",
@@ -278,13 +313,16 @@ on: push
 runs-on-slim:
   group: runner-group
   labels: [ubuntu2404, x64]
+safe-outputs:
+  create-issue:
+    title-prefix: "[ai] "
 ---
 
 # Test Workflow
 
 This is a test workflow.`,
-			expectedRunsOn:   "runs-on:\n      group: runner-group\n      labels:\n      - ubuntu2404\n      - x64",
-			checkJobPatterns: []string{"\n  activation:"},
+			expectedRunsOn:   "runs-on:\n      group: runner-group\n      labels:\n        - ubuntu2404\n        - x64",
+			checkJobPatterns: []string{"\n  activation:", "\n  safe_outputs:"},
 		},
 		{
 			name: "default used when neither runs-on-slim nor safe-outputs.runs-on is set",
@@ -366,14 +404,14 @@ func TestFormatFrameworkJobRunsOn(t *testing.T) {
 			name: "safe-outputs.runs-on takes precedence over runs-on-slim",
 			data: &WorkflowData{
 				RunsOnSlim:  "runs-on: ubuntu-22.04",
-				SafeOutputs: &SafeOutputsConfig{RunsOn: "self-hosted"},
+				SafeOutputs: &SafeOutputsConfig{RunsOn: "runs-on: self-hosted"},
 			},
 			expectedRunsOn: "runs-on: self-hosted",
 		},
 		{
 			name: "safe-outputs.runs-on used when runs-on-slim is empty",
 			data: &WorkflowData{
-				SafeOutputs: &SafeOutputsConfig{RunsOn: "windows-latest"},
+				SafeOutputs: &SafeOutputsConfig{RunsOn: "runs-on: windows-latest"},
 			},
 			expectedRunsOn: "runs-on: windows-latest",
 		},
@@ -386,11 +424,32 @@ func TestFormatFrameworkJobRunsOn(t *testing.T) {
 			expectedRunsOn: "runs-on: " + constants.DefaultActivationJobRunnerImage,
 		},
 		{
-			name: "runs-on-slim array snippet indents continuation lines by 4 spaces",
+			name: "safe-outputs.runs-on array snippet preserves valid YAML nesting",
+			data: &WorkflowData{
+				SafeOutputs: &SafeOutputsConfig{RunsOn: "runs-on:\n- self-hosted\n- linux"},
+			},
+			expectedRunsOn: "runs-on:\n      - self-hosted\n      - linux",
+		},
+		{
+			name: "safe-outputs.runs-on object snippet preserves valid YAML nesting",
+			data: &WorkflowData{
+				SafeOutputs: &SafeOutputsConfig{RunsOn: "runs-on:\n  group: runner-group\n  labels:\n  - linux"},
+			},
+			expectedRunsOn: "runs-on:\n      group: runner-group\n      labels:\n        - linux",
+		},
+		{
+			name: "runs-on-slim array snippet preserves valid YAML nesting",
 			data: &WorkflowData{
 				RunsOnSlim: "runs-on:\n- self-hosted\n- ubuntu2404",
 			},
-			expectedRunsOn: "runs-on:\n    - self-hosted\n    - ubuntu2404",
+			expectedRunsOn: "runs-on:\n      - self-hosted\n      - ubuntu2404",
+		},
+		{
+			name: "runs-on-slim group+labels object snippet preserves valid YAML nesting",
+			data: &WorkflowData{
+				RunsOnSlim: "runs-on:\n  group: runner-group\n  labels:\n  - ubuntu2404",
+			},
+			expectedRunsOn: "runs-on:\n      group: runner-group\n      labels:\n        - ubuntu2404",
 		},
 	}
 

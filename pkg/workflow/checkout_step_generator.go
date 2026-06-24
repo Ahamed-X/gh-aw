@@ -27,7 +27,8 @@ func wikiRepository(repository string) string {
 // referenced in the corresponding checkout step.
 //
 // The step ID for each checkout is "checkout-app-token-{index}" where index is
-// the position in the ordered checkout list.
+// the position in the ordered checkout list. Each returned slice element is a
+// complete YAML step string, matching injectStepCondition's whole-step contract.
 func (cm *CheckoutManager) GenerateCheckoutAppTokenSteps(c *Compiler, permissions *Permissions) []string {
 	checkoutManagerLog.Printf("Building app token minting steps for %d checkout entries", len(cm.ordered))
 	var steps []string
@@ -38,14 +39,34 @@ func (cm *CheckoutManager) GenerateCheckoutAppTokenSteps(c *Compiler, permission
 		checkoutManagerLog.Printf("Generating app token minting step for checkout index=%d repo=%q", checkoutIndex, entry.key.repository)
 		// Pass empty fallback so the app token defaults to github.event.repository.name.
 		// Checkout-specific cross-repo scoping is handled via the explicit repository field.
-		steps = append(steps, c.buildGitHubAppTokenMintStepWithMeta(
+		steps = append(steps, collapseYAMLLinesIntoSteps(c.buildGitHubAppTokenMintStepWithMeta(
 			entry.githubApp,
 			permissions,
 			"",
 			entry.key.repository,
 			fmt.Sprintf("Generate GitHub App token for checkout (%d)", checkoutIndex),
 			fmt.Sprintf("checkout-app-token-%d", checkoutIndex),
-		)...)
+		))...)
+	}
+	return steps
+}
+
+func collapseYAMLLinesIntoSteps(lines []string) []string {
+	if len(lines) == 0 {
+		return nil
+	}
+
+	var steps []string
+	var current strings.Builder
+	for _, line := range lines {
+		if strings.HasPrefix(line, "      - ") && current.Len() > 0 {
+			steps = append(steps, current.String())
+			current.Reset()
+		}
+		current.WriteString(line)
+	}
+	if current.Len() > 0 {
+		steps = append(steps, current.String())
 	}
 	return steps
 }
@@ -61,7 +82,7 @@ func (cm *CheckoutManager) GenerateAdditionalCheckoutSteps(getActionPin func(str
 		if entry.key.path == "" && entry.key.repository == "" {
 			continue
 		}
-		lines = append(lines, generateCheckoutStepLines(entry, checkoutIndex, getActionPin)...)
+		lines = append(lines, generateCheckoutStepLines(entry, checkoutIndex, cm.keepCredentialsForPush, cm.pushToken, getActionPin)...)
 	}
 	checkoutManagerLog.Printf("Generated %d additional checkout step(s)", len(lines))
 	return lines
@@ -73,8 +94,9 @@ func (cm *CheckoutManager) GenerateAdditionalCheckoutSteps(getActionPin func(str
 // so the safe-outputs MCP server (which runs without credentials) can look up the
 // base branch without making any network calls.
 //
-// The manifest file lives at $RUNNER_TEMP/gh-aw/checkout-manifest.json. The default
-// branch is resolved at runtime via:
+// The manifest file lives at $RUNNER_TEMP/gh-aw/safeoutputs/checkout-manifest.json
+// (under safeoutputs/ so it is bind-mounted into the containerized safe-outputs MCP
+// server). The default branch is resolved at runtime via:
 //  1. `git symbolic-ref --short refs/remotes/origin/HEAD` on the local checkout
 //     (works when actions/checkout left the remote HEAD set, typical for fetch-depth: 0)
 //  2. `gh api repos/<owner>/<repo> --jq .default_branch` as a credentialed fallback
@@ -188,6 +210,141 @@ func (cm *CheckoutManager) GenerateGitHubFolderCheckoutStep(repository, ref, tok
 	return []string{sb.String()}
 }
 
+// GenerateConfigureGitCredentialsSteps emits the "Configure Git credentials" step that
+// installs a push-capable token. The root workspace checkout is always the workflow
+// repository, so its remote is configured for ${{ github.repository }}. Any cross-repo
+// checkout placed into a subdirectory is re-authenticated in place so a later push can
+// reach it. The provided gitRemoteToken is used for all remotes.
+//
+// The agent job never pushes, so it has no equivalent of this step; it is used by the
+// safe_outputs job, which supplies the push token (resolvePRCheckoutToken) and a gating
+// condition.
+func (cm *CheckoutManager) GenerateConfigureGitCredentialsSteps(gitRemoteToken string, condition ConditionNode) []string {
+	conditionStr := RenderCondition(condition)
+
+	// Collect subdirectory cross-repo checkouts that need per-repo re-authentication.
+	type subRepo struct {
+		repository string
+		path       string
+	}
+	var subRepos []subRepo
+	for _, entry := range cm.ordered {
+		if entry.key.repository != "" && entry.key.path != "" && !entry.key.wiki {
+			subRepos = append(subRepos, subRepo{repository: entry.key.repository, path: entry.key.path})
+		}
+	}
+
+	if len(subRepos) == 0 {
+		// Simple case: single root repo, call the script directly.
+		rootRepo := "${{ github.repository }}"
+		for _, entry := range cm.ordered {
+			// If a non-default checkout targets the workspace root (no path:), it will clobber
+			// the root checkout; configure git for the effective repo at the root.
+			if entry.key.wiki || entry.key.path != "" || entry.key.repository == "" {
+				continue
+			}
+			rootRepo = entry.key.repository
+		}
+		return []string{
+			"      - name: Configure Git credentials\n",
+			fmt.Sprintf("        if: %s\n", conditionStr),
+			"        env:\n",
+			fmt.Sprintf("          GITHUB_REPOSITORY: %s\n", rootRepo),
+			"          GITHUB_SERVER_URL: ${{ github.server_url }}\n",
+			fmt.Sprintf("          GIT_TOKEN: %s\n", gitRemoteToken),
+			"        run: bash \"${RUNNER_TEMP}/gh-aw/actions/configure_git_credentials.sh\"\n",
+		}
+	}
+
+	// Multi-repo case: configure the root repo, then re-authenticate each subdirectory checkout.
+	rootRepo := "${{ github.repository }}"
+	for _, entry := range cm.ordered {
+		if entry.key.wiki || entry.key.path != "" || entry.key.repository == "" {
+			continue
+		}
+		rootRepo = entry.key.repository
+	}
+
+	// Assign each sub-repo a dedicated env var so that GitHub Actions expressions
+	// (e.g. "${{ github.event.inputs.target_repo }}") are never inlined directly
+	// into the shell command, preventing template-injection scanner failures.
+	// pathEnvVarName is set only when path is expression-based; otherwise the
+	// literal path string is used directly in the shell command.
+	type subRepoEnvVar struct {
+		repository     string
+		path           string
+		envVarName     string
+		pathEnvVarName string // non-empty only when path is a GitHub Actions expression
+	}
+	subRepoEnvVars := make([]subRepoEnvVar, len(subRepos))
+	for i, repo := range subRepos {
+		ev := subRepoEnvVar{
+			repository: repo.repository,
+			path:       repo.path,
+			envVarName: fmt.Sprintf("GH_AW_SUBREPO_%d", i),
+		}
+		if strings.Contains(repo.path, "${{") {
+			ev.pathEnvVarName = fmt.Sprintf("GH_AW_SUBREPO_PATH_%d", i)
+		}
+		subRepoEnvVars[i] = ev
+	}
+
+	// Build the env block, including a dedicated var for every sub-repo.
+	envLines := []string{
+		"        env:\n",
+		fmt.Sprintf("          GITHUB_REPOSITORY: %s\n", rootRepo),
+		"          GITHUB_SERVER_URL: ${{ github.server_url }}\n",
+		fmt.Sprintf("          GIT_TOKEN: %s\n", gitRemoteToken),
+	}
+	for _, repo := range subRepoEnvVars {
+		if strings.Contains(repo.repository, "${{") {
+			// GitHub Actions expression — write unquoted so the runner expands it.
+			// githubExpressionWhitespaceReplacer normalises any embedded newlines/tabs
+			// in the expression string to spaces (defined in safe_outputs_app_config.go).
+			envLines = append(envLines, fmt.Sprintf("          %s: %s\n", repo.envVarName, githubExpressionWhitespaceReplacer.Replace(repo.repository)))
+		} else {
+			// Plain string — quote for safe YAML scalar encoding.
+			envLines = append(envLines, formatYAMLEnv("          ", repo.envVarName, repo.repository))
+		}
+		if repo.pathEnvVarName != "" {
+			envLines = append(envLines, fmt.Sprintf("          %s: %s\n", repo.pathEnvVarName, githubExpressionWhitespaceReplacer.Replace(repo.path)))
+		}
+	}
+
+	steps := []string{
+		"      - name: Configure Git credentials\n",
+		fmt.Sprintf("        if: %s\n", conditionStr),
+	}
+	steps = append(steps, envLines...)
+	steps = append(steps,
+		"        run: |\n",
+		"          bash \"${RUNNER_TEMP}/gh-aw/actions/configure_git_credentials.sh\"\n",
+		"          GIT_SERVER_URL_STRIPPED=\"${GITHUB_SERVER_URL#https://}\"\n",
+	)
+	for _, repo := range subRepoEnvVars {
+		// Use the path env var reference when path is expression-based to avoid
+		// inlining ${{ }} into the run: block (template-injection scanner risk).
+		gitDir := fmt.Sprintf("%q", repo.path)
+		if repo.pathEnvVarName != "" {
+			gitDir = fmt.Sprintf("\"${%s}\"", repo.pathEnvVarName)
+		}
+		// Comment uses the path literal (or env var reference) — never the raw
+		// repository expression — so ${{ }} never appears in the run: block.
+		commentRef := repo.path
+		if repo.pathEnvVarName != "" {
+			commentRef = "${" + repo.pathEnvVarName + "}"
+		}
+		steps = append(steps,
+			fmt.Sprintf("          # Re-authenticate git for %s\n", commentRef),
+			fmt.Sprintf("          git -C %s remote set-url origin \"https://x-access-token:${GIT_TOKEN}@${GIT_SERVER_URL_STRIPPED}/${%s}.git\"\n", gitDir, repo.envVarName),
+		)
+	}
+	steps = append(steps,
+		"          echo \"Git configured with standard GitHub Actions identity\"\n",
+	)
+	return steps
+}
+
 // GenerateDefaultCheckoutStep emits the default workspace checkout, applying any
 // user-supplied overrides (token, fetch-depth, ref, etc.) on top of the required
 // security defaults (persist-credentials: false).
@@ -212,13 +369,21 @@ func (cm *CheckoutManager) GenerateDefaultCheckoutStep(
 	sb.WriteString("        with:\n")
 
 	cleanCreds := override != nil && override.cleanCreds
-	if cleanCreds {
+	if cm.keepCredentialsForPush {
+		// safe_outputs job: retain credentials so later git fetch/push can authenticate
+		// using the push-capable token installed at checkout time.
+		sb.WriteString("          persist-credentials: true\n")
+	} else if cleanCreds {
 		sb.WriteString("          persist-credentials: true\n")
 	} else {
 		// Security: default behavior disables credential persistence so the agent cannot
 		// exfiltrate credentials from disk.
 		sb.WriteString("          persist-credentials: false\n")
 	}
+
+	// Track whether a token has been written to the checkout step so the safe_outputs
+	// push-token fallback below does not double-emit.
+	tokenEmitted := false
 
 	// Apply trial mode overrides
 	if trialMode {
@@ -227,6 +392,7 @@ func (cm *CheckoutManager) GenerateDefaultCheckoutStep(
 		}
 		effectiveToken := getEffectiveGitHubToken("")
 		fmt.Fprintf(&sb, "          token: %s\n", effectiveToken)
+		tokenEmitted = true
 	}
 
 	// Apply user overrides (only when NOT in trial mode to avoid conflicts)
@@ -267,6 +433,7 @@ func (cm *CheckoutManager) GenerateDefaultCheckoutStep(
 		}
 		if effectiveOverrideToken != "" {
 			fmt.Fprintf(&sb, "          token: %s\n", effectiveOverrideToken)
+			tokenEmitted = true
 		}
 		if override.fetchDepth != nil {
 			fmt.Fprintf(&sb, "          fetch-depth: %d\n", *override.fetchDepth)
@@ -285,11 +452,19 @@ func (cm *CheckoutManager) GenerateDefaultCheckoutStep(
 		}
 	}
 
+	// safe_outputs job: when no explicit token was written above, persist the resolved
+	// push token so the credential retained in .git/config matches the token the
+	// safe-output handlers use to fetch/push (avoiding both a wrong-token push and the
+	// duplicate Authorization header that a separate per-command extraheader would add).
+	if !trialMode && !tokenEmitted && cm.keepCredentialsForPush && cm.pushToken != "" {
+		fmt.Fprintf(&sb, "          token: %s\n", cm.pushToken)
+	}
+
 	steps := []string{sb.String()}
 	if override != nil && len(override.sparsePatterns) > 0 {
 		steps = append(steps, generateSparseCheckoutPartialCloneResetStep(""))
 	}
-	if cleanCreds {
+	if cleanCreds && !cm.keepCredentialsForPush {
 		steps = append(steps, generateCheckoutCredentialsCleanupStep())
 	}
 
@@ -312,7 +487,10 @@ func (cm *CheckoutManager) GenerateDefaultCheckoutStep(
 // generateCheckoutStepLines generates YAML step lines for a single non-default checkout.
 // The index parameter identifies the checkout's position in the ordered list, used to
 // reference the correct app token minting step when app authentication is configured.
-func generateCheckoutStepLines(entry *resolvedCheckout, index int, getActionPin func(string) string) []string {
+// When keepCredentialsForPush is true (safe_outputs job), credentials are retained
+// (persist-credentials: true) and the post-checkout cleanup step is suppressed so a later
+// git fetch/push can authenticate.
+func generateCheckoutStepLines(entry *resolvedCheckout, index int, keepCredentialsForPush bool, pushToken string, getActionPin func(string) string) []string {
 	checkoutManagerLog.Printf("Generating checkout step lines: index=%d, repo=%q, path=%q, ref=%q, appAuth=%v",
 		index, entry.key.repository, entry.key.path, entry.ref, entry.githubApp != nil)
 	name := "Checkout " + checkoutStepName(entry.key)
@@ -321,7 +499,10 @@ func generateCheckoutStepLines(entry *resolvedCheckout, index int, getActionPin 
 	fmt.Fprintf(&sb, "        uses: %s\n", getActionPin("actions/checkout"))
 	sb.WriteString("        with:\n")
 
-	if entry.cleanCreds {
+	if keepCredentialsForPush {
+		// safe_outputs job: retain credentials so later git fetch/push can authenticate.
+		sb.WriteString("          persist-credentials: true\n")
+	} else if entry.cleanCreds {
 		sb.WriteString("          persist-credentials: true\n")
 	} else {
 		// Security: default behavior disables credential persistence
@@ -342,6 +523,12 @@ func generateCheckoutStepLines(entry *resolvedCheckout, index int, getActionPin 
 	}
 	// Determine effective token: github-app-minted token takes precedence
 	effectiveToken := resolveCheckoutTokenExpression(entry, index, false)
+	// safe_outputs job: when this checkout declares no token/app of its own, persist the
+	// resolved push token so the retained .git/config credential matches the token the
+	// safe-output handlers use to fetch/push.
+	if effectiveToken == "" && keepCredentialsForPush && pushToken != "" {
+		effectiveToken = pushToken
+	}
 	if effectiveToken != "" {
 		fmt.Fprintf(&sb, "          token: %s\n", effectiveToken)
 	}
@@ -373,7 +560,7 @@ func generateCheckoutStepLines(entry *resolvedCheckout, index int, getActionPin 
 	if len(entry.sparsePatterns) > 0 {
 		steps = append(steps, generateSparseCheckoutPartialCloneResetStep(entry.key.path))
 	}
-	if entry.cleanCreds {
+	if entry.cleanCreds && !keepCredentialsForPush {
 		steps = append(steps, generateCheckoutCredentialsCleanupStep())
 	}
 	if fetchStep := generateFetchStepLines(entry, index); fetchStep != "" {

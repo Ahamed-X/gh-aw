@@ -135,14 +135,16 @@ func (e *CopilotEngine) GetExecutionSteps(workflowData *WorkflowData, logFile st
 	// Build copilot CLI arguments based on configuration
 	var copilotArgs []string
 	sandboxEnabled := isFirewallEnabled(workflowData)
+	llmProvider := e.ResolveLLMProvider(workflowData)
+	providerOverrideBYOK := llmProvider != LLMProviderGitHub && sandboxEnabled
 	// isBYOKMode is true when the user has set COPILOT_PROVIDER_BASE_URL in engine.env,
 	// which routes Copilot requests to a non-GitHub provider. In that mode the GitHub
 	// identity token (COPILOT_GITHUB_TOKEN) must NOT be injected into the step env:
 	// forwarding it to a third-party host would be a credential leak.
-	isBYOKMode := engineEnvHasKey(workflowData, constants.CopilotProviderBaseURL)
+	isBYOKMode := providerOverrideBYOK || engineEnvHasKey(workflowData, constants.CopilotProviderBaseURL)
 	if sandboxEnabled {
 		// Simplified args for sandbox mode (AWF)
-		copilotArgs = []string{"--add-dir", "/tmp/gh-aw/", "--log-level", "all", "--log-dir", logsFolder}
+		copilotArgs = []string{"--add-dir", constants.TmpGhAwDirSlash, "--log-level", "all", "--log-dir", logsFolder}
 
 		// Note: --add-dir "${GITHUB_WORKSPACE}" is appended raw after shellJoinArgs below
 		// to allow shell variable expansion (cannot go through shellEscapeArg).
@@ -151,7 +153,7 @@ func (e *CopilotEngine) GetExecutionSteps(workflowData *WorkflowData, logFile st
 		copilotExecLog.Print("Using firewall mode with simplified arguments")
 	} else {
 		// Original args for non-sandbox mode
-		copilotArgs = []string{"--add-dir", "/tmp/", "--add-dir", "/tmp/gh-aw/", "--add-dir", "/tmp/gh-aw/agent/", "--log-level", "all", "--log-dir", logsFolder}
+		copilotArgs = []string{"--add-dir", "/tmp/", "--add-dir", constants.TmpGhAwDirSlash, "--add-dir", constants.TmpGhAwAgentDir, "--log-level", "all", "--log-dir", logsFolder}
 		copilotExecLog.Print("Using standard mode with full arguments")
 	}
 
@@ -262,7 +264,7 @@ func (e *CopilotEngine) GetExecutionSteps(workflowData *WorkflowData, logFile st
 	} else if sandboxEnabled {
 		// AWF - use the installed binary directly
 		// The binary is mounted into the AWF container from /usr/local/bin/copilot
-		commandName = "/usr/local/bin/copilot"
+		commandName = constants.CopilotBinaryPath
 	} else {
 		// Non-sandbox mode: use standard copilot command
 		commandName = "copilot"
@@ -285,9 +287,9 @@ func (e *CopilotEngine) GetExecutionSteps(workflowData *WorkflowData, logFile st
 	}
 	isCopilotSDKMode := workflowData.EngineConfig != nil && workflowData.EngineConfig.CopilotSDK
 	sdkDriverScriptName := "copilot_sdk_driver.cjs"
-	customSDKDriverConfigured := workflowData.EngineConfig != nil && workflowData.EngineConfig.CopilotSDKDriver != ""
-	if workflowData.EngineConfig != nil && workflowData.EngineConfig.CopilotSDKDriver != "" {
-		sdkDriverScriptName = workflowData.EngineConfig.CopilotSDKDriver
+	customSDKDriverConfigured := workflowData.EngineConfig != nil && workflowData.EngineConfig.Driver != ""
+	if workflowData.EngineConfig != nil && workflowData.EngineConfig.Driver != "" {
+		sdkDriverScriptName = workflowData.EngineConfig.Driver
 	}
 
 	// copilotSDKServerArgsJSON holds the JSON-encoded server-args array that will be set in
@@ -399,10 +401,11 @@ func (e *CopilotEngine) GetExecutionSteps(workflowData *WorkflowData, logFile st
 		} else {
 			allowedDomains = GetAllowedDomainsForEngine(constants.CopilotEngine, workflowData.NetworkPermissions, workflowData.Tools, workflowData.Runtimes)
 		}
-		// Add Copilot API target domains to the firewall allow-list.
-		// Resolved from engine.api-target or GITHUB_COPILOT_BASE_URL in engine.env.
-		if copilotAPITarget := GetCopilotAPITarget(workflowData); copilotAPITarget != "" {
-			allowedDomains = mergeAPITargetDomains(allowedDomains, copilotAPITarget)
+		// Add Copilot BYOK/API target domains to the firewall allow-list.
+		// This keeps normal and detection runs in sync while preserving detection's
+		// otherwise-minimal network footprint.
+		for _, copilotTarget := range GetCopilotAllowlistTargets(workflowData) {
+			allowedDomains = mergeAPITargetDomains(allowedDomains, copilotTarget)
 		}
 
 		// AWF v0.15.0+ uses chroot mode by default, providing transparent access to host binaries
@@ -415,17 +418,14 @@ func (e *CopilotEngine) GetExecutionSteps(workflowData *WorkflowData, logFile st
 		// Version precedence works because actions/setup-* PREPEND to PATH, so
 		// /opt/hostedtoolcache/go/1.25.6/x64/bin comes before /usr/bin in AWF_HOST_PATH.
 		//
-		// AWF v0.15.0+ uses chroot mode by default, but on self-hosted GPU runners
-		// (e.g. aw-gpu-runner-T4) the tool cache lives at /home/runner/work/_tool
-		// (not /opt/hostedtoolcache). sudo's secure_path also strips the PATH
-		// additions from actions/setup-node, so the container may not find node.
+		// AWF v0.15.0+ uses chroot mode by default, and sudo's secure_path may strip
+		// the PATH additions from actions/setup-node, so the container may not find node.
 		//
 		// Prepend GetNpmBinPathSetup() to the engine command so it runs inside the
-		// AWF container before the node resolution command. This adds both
-		// /opt/hostedtoolcache and /home/runner/work/_tool bin directories to PATH,
-		// ensuring that the command -v node fallback in nodeRuntimeResolutionCommand
-		// succeeds regardless of runner type. This mirrors the pattern used by the
-		// Claude and Codex engines.
+		// AWF container before the node resolution command. This adds RUNNER_TOOL_CACHE
+		// bin directories to PATH, ensuring that the command -v node fallback in
+		// nodeRuntimeResolutionCommand succeeds regardless of the runner's tool cache
+		// location. This mirrors the pattern used by the Claude and Codex engines.
 		npmPathSetup := GetNpmBinPathSetup()
 		engineCommand := fmt.Sprintf("%s && %s", npmPathSetup, copilotCommand)
 
@@ -555,6 +555,15 @@ touch %s
 		"GITHUB_SERVER_URL": "${{ github.server_url }}",
 		"GITHUB_API_URL":    "${{ github.api_url }}",
 	}
+	env["GH_AW_LLM_PROVIDER"] = llmProvider
+
+	// Auto-configure Copilot BYOK routing when engine.model-provider selects a non-GitHub provider.
+	// Explicit engine.env values still win later via maps.Copy.
+	if providerOverrideBYOK {
+		env[constants.CopilotProviderBaseURL] = llmProviderGatewayBaseURL(llmProvider)
+		env[constants.CopilotProviderAPIKey] = llmProviderSecretExpression(llmProvider, workflowData)
+	}
+
 	// Inject the GitHub token only when not in BYOK mode. The engine.env merge that
 	// happens later (maps.Copy(env, workflowData.EngineConfig.Env)) can still override
 	// or nullify this if the user explicitly sets COPILOT_GITHUB_TOKEN in engine.env.
@@ -577,7 +586,7 @@ touch %s
 	}
 
 	// Always add GH_AW_PROMPT for agentic workflows
-	env["GH_AW_PROMPT"] = "/tmp/gh-aw/aw-prompts/prompt.txt"
+	env["GH_AW_PROMPT"] = constants.AwPromptsFile
 
 	// Tag the step as a GitHub AW agentic execution for discoverability by agents
 	env["GITHUB_AW"] = "true"

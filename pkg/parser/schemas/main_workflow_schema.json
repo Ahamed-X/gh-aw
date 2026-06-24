@@ -414,8 +414,8 @@
                 {
                   "type": "string",
                   "minLength": 1,
-                  "pattern": "^[^/]",
-                  "description": "Command name as a string (shorthand format, e.g., 'customname' for '/customname' triggers). Command names must not start with '/' as the slash is automatically added when matching commands."
+                  "pattern": "^(\\*|[^/*][^/*]*\\*?)$",
+                  "description": "Command name as a string (shorthand format, e.g., 'customname' for '/customname' triggers). Command names must not start with '/'. Use '*' to match any slash command, or append '*' as a suffix to enable wildcard prefix matching (for example, 'smoke*' matches '/smoke-copilot')."
                 },
                 {
                   "type": "object",
@@ -426,8 +426,8 @@
                         {
                           "type": "string",
                           "minLength": 1,
-                          "pattern": "^[^/]",
-                          "description": "Single command name for slash commands (e.g., 'helper-bot' for '/helper-bot' triggers). Command names must not start with '/' as the slash is automatically added when matching commands. Defaults to workflow filename without .md extension if not specified."
+                          "pattern": "^(\\*|[^/*][^/*]*\\*?)$",
+                          "description": "Single command name for slash commands (e.g., 'helper-bot' for '/helper-bot' triggers). Command names must not start with '/'. Use '*' to match any slash command, or append '*' as a suffix to enable wildcard prefix matching. Defaults to workflow filename without .md extension if not specified."
                         },
                         {
                           "type": "array",
@@ -436,8 +436,8 @@
                           "items": {
                             "type": "string",
                             "minLength": 1,
-                            "pattern": "^[^/]",
-                            "description": "Command name without leading slash"
+                            "pattern": "^(\\*|[^/*][^/*]*\\*?)$",
+                            "description": "Command name without leading slash. Use '*' to match any slash command, or append '*' as a suffix to enable wildcard prefix matching."
                           },
                           "maxItems": 25
                         }
@@ -485,8 +485,8 @@
                 {
                   "type": "string",
                   "minLength": 1,
-                  "pattern": "^[^/]",
-                  "description": "Command name as a string (shorthand format, e.g., 'customname' for '/customname' triggers). Command names must not start with '/' as the slash is automatically added when matching commands."
+                  "pattern": "^(\\*|[^/*][^/*]*\\*?)$",
+                  "description": "Command name as a string (shorthand format, e.g., 'customname' for '/customname' triggers). Command names must not start with '/'. Use '*' to match any slash command, or append '*' as a suffix to enable wildcard prefix matching (for example, 'smoke*' matches '/smoke-copilot')."
                 },
                 {
                   "type": "object",
@@ -497,8 +497,8 @@
                         {
                           "type": "string",
                           "minLength": 1,
-                          "pattern": "^[^/]",
-                          "description": "Custom command name for slash commands (e.g., 'helper-bot' for '/helper-bot' triggers). Command names must not start with '/' as the slash is automatically added when matching commands. Defaults to workflow filename without .md extension if not specified."
+                          "pattern": "^(\\*|[^/*][^/*]*\\*?)$",
+                          "description": "Custom command name for slash commands (e.g., 'helper-bot' for '/helper-bot' triggers). Command names must not start with '/'. Use '*' to match any slash command, or append '*' as a suffix to enable wildcard prefix matching. Defaults to workflow filename without .md extension if not specified."
                         },
                         {
                           "type": "array",
@@ -507,8 +507,8 @@
                           "items": {
                             "type": "string",
                             "minLength": 1,
-                            "pattern": "^[^/]",
-                            "description": "Command name without leading slash"
+                            "pattern": "^(\\*|[^/*][^/*]*\\*?)$",
+                            "description": "Command name without leading slash. Use '*' to match any slash command, or append '*' as a suffix to enable wildcard prefix matching."
                           },
                           "maxItems": 25
                         }
@@ -2130,63 +2130,7 @@
             },
             "permissions": {
               "description": "Additional permissions for the pre-activation job. Use to declare extra scopes required by on.steps (e.g., issues: read for GitHub API calls in steps).",
-              "oneOf": [
-                {
-                  "type": "object",
-                  "description": "Map of permission scope to level",
-                  "properties": {
-                    "actions": {
-                      "type": "string",
-                      "enum": ["read", "write", "none"]
-                    },
-                    "checks": {
-                      "type": "string",
-                      "enum": ["read", "write", "none"]
-                    },
-                    "contents": {
-                      "type": "string",
-                      "enum": ["read", "write", "none"]
-                    },
-                    "deployments": {
-                      "type": "string",
-                      "enum": ["read", "write", "none"]
-                    },
-                    "discussions": {
-                      "type": "string",
-                      "enum": ["read", "write", "none"]
-                    },
-                    "issues": {
-                      "type": "string",
-                      "enum": ["read", "write", "none"]
-                    },
-                    "packages": {
-                      "type": "string",
-                      "enum": ["read", "write", "none"]
-                    },
-                    "pages": {
-                      "type": "string",
-                      "enum": ["read", "write", "none"]
-                    },
-                    "pull-requests": {
-                      "type": "string",
-                      "enum": ["read", "write", "none"]
-                    },
-                    "repository-projects": {
-                      "type": "string",
-                      "enum": ["read", "write", "none"]
-                    },
-                    "security-events": {
-                      "type": "string",
-                      "enum": ["read", "write", "none"]
-                    },
-                    "statuses": {
-                      "type": "string",
-                      "enum": ["read", "write", "none"]
-                    }
-                  },
-                  "additionalProperties": false
-                }
-              ],
+              "$ref": "#/$defs/github_actions_permissions",
               "examples": [
                 {
                   "issues": "read"
@@ -2194,6 +2138,9 @@
                 {
                   "issues": "read",
                   "pull-requests": "read"
+                },
+                {
+                  "vulnerability-alerts": "read"
                 }
               ]
             },
@@ -3305,6 +3252,15 @@
                       "type": "string",
                       "description": "AWF version override used to install and run the matching firewall version."
                     },
+                    "platform": {
+                      "type": "string",
+                      "enum": ["github.com", "ghes", "ghec", "ghec-self-hosted"],
+                      "description": "AWF platform.type override. Declares the GitHub deployment type so AWF can apply deterministic Copilot auth behavior without relying on host heuristics. Omit to let AWF use its default host heuristic behavior."
+                    },
+                    "network-isolation": {
+                      "type": "boolean",
+                      "description": "Enable AWF network topology egress mode (--network-isolation). In this mode, MCP sidecars run as bridge containers and AWF attaches them to its internal awf-net network."
+                    },
                     "command": {
                       "type": "string",
                       "x-internal": true,
@@ -3764,6 +3720,12 @@
       "$ref": "#/$defs/max_ai_credits_limit",
       "default": 1000,
       "description": "Per-run AI Credits budget control for firewall cost enforcement. Enabled by default at 1000 (1k) when omitted. Set to -1 to disable both budget enforcement and token steering. Supports GitHub Actions expressions."
+    },
+    "max-turn-cache-misses": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 5,
+      "description": "Maximum number of consecutive AWF cache misses allowed before the API proxy blocks further requests. Maps to `apiProxy.maxCacheMisses`. Precedence: frontmatter value \u2192 `GH_AW_DEFAULT_MAX_TURN_CACHE_MISSES` env override \u2192 built-in default `5`."
     },
     "max-daily-ai-credits": {
       "$ref": "#/$defs/max_daily_ai_credits_limit",
@@ -4606,6 +4568,10 @@
                     "type": "string"
                   },
                   "description": "List of allowed file extensions (e.g., [\".json\", \".txt\"]). Default: [\".json\", \".jsonl\", \".txt\", \".md\", \".csv\"]"
+                },
+                "format-json": {
+                  "type": "boolean",
+                  "description": "When true, all .json files are pretty-printed (2-space indent) before being committed, making them human-readable in the repository (default: false)"
                 }
               },
               "additionalProperties": false,
@@ -4697,6 +4663,10 @@
                       "type": "string"
                     },
                     "description": "List of allowed file extensions (e.g., [\".json\", \".txt\"]). Default: [\".json\", \".jsonl\", \".txt\", \".md\", \".csv\"]"
+                  },
+                  "format-json": {
+                    "type": "boolean",
+                    "description": "When true, all .json files are pretty-printed (2-space indent) before being committed, making them human-readable in the repository (default: false)"
                   }
                 },
                 "additionalProperties": false
@@ -4903,6 +4873,11 @@
         }
       ],
       "properties": {
+        "urls": {
+          "type": "string",
+          "description": "URL sanitization policy for safe outputs. \"allowed-only\" sanitizes all non-allowed URLs everywhere. \"allowed-or-code-region\" preserves URLs inside fenced and inline code regions while sanitizing prose.",
+          "enum": ["allowed-only", "allowed-or-code-region"]
+        },
         "allowed-domains": {
           "type": "array",
           "description": "List of allowed domains for URL redaction in safe output handlers. Supports ecosystem identifiers (e.g., \"python\", \"node\", \"default-safe-outputs\") like network.allowed. These domains are unioned with the engine defaults and network.allowed when computing the final allowed domain set. localhost and github.com are always included.",
@@ -5074,6 +5049,11 @@
                       "additionalProperties": true
                     }
                   ]
+                },
+                "normalize-closing-keywords": {
+                  "type": "boolean",
+                  "description": "When true, strip backticks from recognized issue-closing keywords (e.g. `Closes #1` \u2192 Closes #1) in body fields for this output type.",
+                  "examples": [true, false]
                 }
               },
               "additionalProperties": false,
@@ -5689,6 +5669,10 @@
                   "minLength": 1,
                   "pattern": "\\S"
                 },
+                "required-category": {
+                  "type": "string",
+                  "description": "Required category for matching when close-older-discussions is enabled. Only discussions in this category will be considered when searching for older discussions to close."
+                },
                 "fallback-to-issue": {
                   "type": "boolean",
                   "description": "When true (default), fallback to creating an issue if discussion creation fails due to permissions. The fallback issue will include a note indicating it was intended to be a discussion. If close-older-discussions is enabled, the close-older-issues logic will be applied to the fallback issue.",
@@ -5762,7 +5746,8 @@
                 {
                   "title-prefix": "[weekly-report] ",
                   "category": "reports",
-                  "close-older-discussions": true
+                  "close-older-discussions": true,
+                  "required-category": "reports"
                 },
                 {
                   "labels": ["weekly-report", "automation"],
@@ -6400,6 +6385,11 @@
                       "additionalProperties": true
                     }
                   ]
+                },
+                "normalize-closing-keywords": {
+                  "type": "boolean",
+                  "description": "When true, strip backticks from recognized issue-closing keywords (e.g. `Closes #1` \u2192 Closes #1) in body fields for this output type.",
+                  "examples": [true, false]
                 }
               },
               "additionalProperties": false,
@@ -6632,7 +6622,7 @@
                 },
                 "max-patch-size": {
                   "type": "integer",
-                  "description": "Maximum allowed size for git patches in kilobytes (KB) for create-pull-request only. Overrides safe-outputs max-patch-size for this output type. Defaults to 1024 KB (1 MB) when unset.",
+                  "description": "Maximum allowed size for git patches in kilobytes (KB) for create-pull-request only. Overrides safe-outputs max-patch-size for this output type. Defaults to 4096 KB (4 MB) when unset.",
                   "minimum": 1,
                   "maximum": 10240
                 },
@@ -6795,6 +6785,11 @@
                   "type": "boolean",
                   "description": "When true, adds workflows: write to the GitHub App token permissions. Required when allowed-files targets .github/workflows/ paths. Requires safe-outputs.github-app to be configured because the workflows permission is a GitHub App-only permission and cannot be granted via GITHUB_TOKEN.",
                   "default": false,
+                  "examples": [true, false]
+                },
+                "normalize-closing-keywords": {
+                  "type": "boolean",
+                  "description": "When true, strip backticks from recognized issue-closing keywords (e.g. `Closes #1` \u2192 Closes #1) in body fields for this output type.",
                   "examples": [true, false]
                 }
               },
@@ -8479,6 +8474,21 @@
                   },
                   "description": "Glob patterns for allowed source branch names (pull request head ref). The PR's branch must match at least one pattern."
                 },
+                "target": {
+                  "type": "string",
+                  "description": "Target for merging: 'triggering' (default, current PR), or '*' (any PR with pull_request_number field)"
+                },
+                "target-repo": {
+                  "type": "string",
+                  "description": "Target repository in format 'owner/repo' for cross-repository operations. Takes precedence over trial target repo settings."
+                },
+                "allowed-repos": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "List of additional repositories in format 'owner/repo' that pull requests can be merged in. The target repository is always implicitly allowed."
+                },
                 "github-token": {
                   "$ref": "#/$defs/github_token",
                   "description": "GitHub token to use for this specific output type. Overrides global github-token if specified."
@@ -8487,6 +8497,22 @@
                   "type": "boolean",
                   "description": "If true, evaluate merge gates and emit preview results without executing the merge API call.",
                   "examples": [true, false]
+                },
+                "samples": {
+                  "description": "Internal hidden feature. Optional list of declarative sample payloads that exercise this safe-output handler. Used by the hidden `gh aw compile --use-samples` flag to replace the agentic step with a deterministic replay through the safe-outputs MCP server. Each entry should conform to the corresponding MCP tool inputSchema; recognized sidecar keys (currently `patch` for create-pull-request and push-to-pull-request-branch) are stripped before schema validation and consumed by the replay driver.",
+                  "oneOf": [
+                    {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": true
+                      }
+                    },
+                    {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  ]
                 },
                 "required-title-prefix": {
                   "type": "string",
@@ -8594,7 +8620,7 @@
                 },
                 "max-patch-size": {
                   "type": "integer",
-                  "description": "Maximum allowed size for git patches in kilobytes (KB) for push-to-pull-request-branch only. Overrides safe-outputs max-patch-size for this output type. Defaults to 1024 KB (1 MB) when unset.",
+                  "description": "Maximum allowed size for git patches in kilobytes (KB) for push-to-pull-request-branch only. Overrides safe-outputs max-patch-size for this output type. Defaults to 4096 KB (4 MB) when unset.",
                   "minimum": 1,
                   "maximum": 10240
                 },
@@ -9782,10 +9808,10 @@
         },
         "max-patch-size": {
           "type": "integer",
-          "description": "Maximum allowed size for git patches in kilobytes (KB). Defaults to 1024 KB (1 MB). If patch exceeds this size, the job will fail.",
+          "description": "Maximum allowed size for git patches in kilobytes (KB). Defaults to 4096 KB (4 MB). If patch exceeds this size, the job will fail.",
           "minimum": 1,
           "maximum": 10240,
-          "default": 1024
+          "default": 4096
         },
         "max-patch-files": {
           "type": "integer",
@@ -9848,8 +9874,16 @@
                   "description": "Per-run AI Credits budget for threat-detection engine execution. Accepts numeric values only (expressions are not supported). When unset, gh-aw emits a runtime default expression `${{ vars.GH_AW_DEFAULT_DETECTION_MAX_AI_CREDITS || '400' }}`."
                 },
                 "runs-on": {
-                  "type": "string",
-                  "description": "Runner specification for the detection job. Overrides agent.runs-on for the detection job only. Defaults to agent.runs-on."
+                  "$ref": "#/$defs/github_actions_runs_on",
+                  "description": "Runner specification for the detection job. Overrides agent.runs-on for the detection job only. Supports string, array, or runner-group object forms. Defaults to agent.runs-on.",
+                  "examples": [
+                    "ubuntu-latest",
+                    ["self-hosted", "linux", "x64"],
+                    {
+                      "group": "larger-runners",
+                      "labels": ["ubuntu-latest-8-cores"]
+                    }
+                  ]
                 },
                 "continue-on-error": {
                   "$ref": "#/$defs/templatable_boolean",
@@ -10184,10 +10218,16 @@
               "type": "object",
               "description": "Advanced configuration for @mention filtering with fine-grained control",
               "properties": {
+                "allowed-collaborators": {
+                  "type": "boolean",
+                  "description": "Allow mentions of repository collaborators (users with repository access, excluding bots). Default: true",
+                  "default": true
+                },
                 "allow-team-members": {
                   "type": "boolean",
-                  "description": "Allow mentions of repository team members (collaborators with any permission level, excluding bots). Default: true",
-                  "default": true
+                  "description": "Deprecated alias for allowed-collaborators",
+                  "deprecated": true,
+                  "x-deprecation-message": "'allow-team-members' is deprecated in safe-outputs.mentions. Use 'allowed-collaborators' instead. Run 'gh aw fix' to automatically migrate."
                 },
                 "allow-context": {
                   "type": "boolean",
@@ -10201,6 +10241,15 @@
                     "type": "string",
                     "minLength": 1
                   }
+                },
+                "allowed-teams": {
+                  "type": "array",
+                  "description": "List of team slugs whose members are always allowed to be mentioned. Accepts 'team-slug' (resolved against the current org) or 'org/team-slug' format. Team members are fetched from the GitHub API at runtime; bots are excluded. IMPORTANT: requires read:org scope \u2014 not available with the default GITHUB_TOKEN. Use a classic PAT with read:org, a fine-grained PAT with Members:Read, or a GitHub App with the Members:Read permission. Without the required scope, team lookups fail with a warning and those members are skipped.",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "examples": [["myorg/eng"], ["reviewers"], ["myorg/eng", "myorg/docs"]]
                 },
                 "max": {
                   "description": "Maximum number of mentions allowed per message. Default: 50 Supports integer or GitHub Actions expression (e.g. '${{ inputs.max }}').",
@@ -10241,10 +10290,24 @@
           "examples": [false, true]
         },
         "report-failure-as-issue": {
-          "type": "boolean",
-          "description": "When false, disables creating failure tracking issues when workflows fail. Useful for workflows where failures are expected or handled elsewhere. Defaults to true.",
+          "oneOf": [
+            {
+              "type": "boolean",
+              "description": "When false, disables creating failure tracking issues when workflows fail. When true, all failures trigger issues. Defaults to true."
+            },
+            {
+              "type": "array",
+              "description": "List of failure categories that should trigger issue creation. Categories can be prefixed with '!' to exclude them (e.g., '!inference_access_error'). If only non-prefixed categories are specified, only those categories trigger issues. If only prefixed (excluded) categories are specified, all categories except those trigger issues. If both are specified, categories must match included AND not match excluded. Common categories: agent_failure, timed_out, missing_safe_outputs, report_incomplete, missing_tool, missing_data, inference_access_error, mcp_policy_error, ai_credits_rate_limit_error, max_ai_credits_exceeded.",
+              "items": {
+                "type": "string",
+                "pattern": "^!?(agent_failure|timed_out|missing_safe_outputs|report_incomplete|missing_tool|missing_data|tool_denials_exceeded|cache_miss_misconfiguration|secret_verification_failed|inference_access_error|mcp_policy_error|model_not_supported_error|ai_credits_rate_limit_error|unknown_model_ai_credits|max_ai_credits_exceeded|app_token_minting_failed|lockdown_check_failed|stale_lock_file_failed|daily_ai_credits_exceeded|assignment_errors|assign_copilot_failures|create_discussion_errors|code_push_failures|repo_memory_validation_errors|push_repo_memory_failure)$"
+              },
+              "minItems": 1,
+              "uniqueItems": true
+            }
+          ],
           "default": true,
-          "examples": [false, true]
+          "examples": [false, true, ["agent_failure", "missing_safe_outputs"], ["!inference_access_error", "!ai_credits_rate_limit_error"]]
         },
         "failure-issue-repo": {
           "type": "string",
@@ -10322,8 +10385,16 @@
           ]
         },
         "runs-on": {
-          "type": "string",
-          "description": "Runner specification for all safe-outputs jobs (activation, create-issue, add-comment, etc.). Single runner label (e.g., 'ubuntu-slim', 'ubuntu-latest', 'windows-latest', 'self-hosted'). Defaults to 'ubuntu-slim'. See https://github.blog/changelog/2025-10-28-1-vcpu-linux-runner-now-available-in-github-actions-in-public-preview/"
+          "$ref": "#/$defs/github_actions_runs_on",
+          "description": "Runner specification for all safe-outputs jobs (activation, create-issue, add-comment, etc.). Supports string, array, or runner-group object forms. Defaults to 'ubuntu-slim'. See https://github.blog/changelog/2025-10-28-1-vcpu-linux-runner-now-available-in-github-actions-in-public-preview/",
+          "examples": [
+            "ubuntu-slim",
+            ["self-hosted", "linux", "x64"],
+            {
+              "group": "larger-runners",
+              "labels": ["ubuntu-latest-8-cores"]
+            }
+          ]
         },
         "steps": {
           "type": "array",
@@ -10478,6 +10549,137 @@
             }
           ],
           "description": "Enable AI agents to signal that a task could not be completed due to infrastructure or tool failures (e.g., MCP crash, missing auth, inaccessible repository). Activates failure handling even when the agent exits 0."
+        },
+        "replace-label": {
+          "oneOf": [
+            {
+              "type": "null",
+              "description": "Null configuration allows any labels to be replaced. Labels will be created if they don't already exist in the repository."
+            },
+            {
+              "type": "object",
+              "description": "Configuration for replacing one label with another on issues/PRs in a single atomic operation. Enables clear state transitions (e.g. 'in-progress' \u2192 'done').",
+              "properties": {
+                "allowed-transitions": {
+                  "type": "array",
+                  "description": "Optional list of allowed label state transitions. Each entry specifies a (from, to) pair that is permitted. When specified, the agent may ONLY perform the listed transitions, regardless of allowed-add/allowed-remove. Useful for enforcing a strict state machine (e.g. only 'in-review' → 'approved' is allowed).",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "from": {
+                        "type": "string",
+                        "description": "The label that must currently be on the item and will be removed."
+                      },
+                      "to": {
+                        "type": "string",
+                        "description": "The label that will be added."
+                      }
+                    },
+                    "required": ["from", "to"],
+                    "additionalProperties": false
+                  },
+                  "minItems": 1,
+                  "maxItems": 100
+                },
+                "allowed-add": {
+                  "type": "array",
+                  "description": "Optional list of allowed label patterns that can be added (supports glob patterns like 'state-*'). Labels will be created if they don't already exist in the repository. If omitted, any labels are allowed.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "minItems": 1,
+                  "maxItems": 50
+                },
+                "allowed-remove": {
+                  "type": "array",
+                  "description": "Optional list of allowed label patterns that can be removed (supports glob patterns like 'state-*'). If omitted, any labels can be removed.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "minItems": 1,
+                  "maxItems": 50
+                },
+                "blocked": {
+                  "type": "array",
+                  "description": "Optional list of blocked label patterns (supports glob patterns like '~*', '*[bot]'). Applied to both label_to_add and label_to_remove. Rejected before allowed list filtering.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "minItems": 1,
+                  "maxItems": 50
+                },
+                "max": {
+                  "description": "Optional maximum number of label replacements (default: 5). Supports integer or GitHub Actions expression (e.g. '${{ inputs.max }}').",
+                  "oneOf": [
+                    {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    {
+                      "type": "string",
+                      "pattern": "^\\$\\{\\{.*\\}\\}$",
+                      "description": "GitHub Actions expression that resolves to an integer at runtime"
+                    }
+                  ]
+                },
+                "target": {
+                  "type": "string",
+                  "description": "Target for the operation: 'triggering' (default), '*' (any issue/PR), or explicit issue/PR number"
+                },
+                "target-repo": {
+                  "type": "string",
+                  "description": "Target repository in format 'owner/repo' for cross-repository label replacement. Takes precedence over trial target repo settings."
+                },
+                "github-token": {
+                  "$ref": "#/$defs/github_token",
+                  "description": "GitHub token to use for this specific output type. Overrides global github-token if specified."
+                },
+                "allowed-repos": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "List of additional repositories in format 'owner/repo' that label replacements can target. When specified, the agent can use a 'repo' field in the output to specify which repository to update labels on."
+                },
+                "required-labels": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "minItems": 1,
+                  "maxItems": 50,
+                  "description": "Conjunctive label constraint: ALL of these labels must be present on the issue/PR for the operation to proceed."
+                },
+                "required-title-prefix": {
+                  "type": "string",
+                  "description": "Title prefix constraint: the issue/PR title must start with this prefix for the operation to proceed."
+                },
+                "staged": {
+                  "type": "boolean",
+                  "description": "If true, emit step summary messages instead of making GitHub API calls for this specific output type (preview mode)",
+                  "examples": [true, false]
+                },
+                "samples": {
+                  "description": "Internal hidden feature. Optional list of declarative sample payloads that exercise this safe-output handler.",
+                  "oneOf": [
+                    {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": true
+                      }
+                    },
+                    {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  ]
+                }
+              },
+              "additionalProperties": false
+            }
+          ],
+          "description": "Enable AI agents to replace one label with another on GitHub issues or pull requests in a single atomic operation. Ideal for maintaining label-based state machines (e.g. transitioning issues through workflow states)."
         }
       },
       "additionalProperties": false
@@ -10600,6 +10802,20 @@
               "enum": ["error", "warn", "ignore"],
               "default": "error",
               "description": "How to handle missing OTLP endpoint/header values at runtime (for example from unset secrets). 'error' fails workflow startup (default), 'warn' logs a warning and skips MCP gateway OTLP configuration, and 'ignore' skips MCP gateway OTLP configuration without warning. This affects MCP gateway setup only; workflow-level OTEL_* environment variables are still injected."
+            },
+            "attributes": {
+              "type": "object",
+              "description": "Additional custom span attributes to attach to OTLP spans emitted by this workflow. Values may be static strings or template expressions resolved from existing span attributes, such as '{{ gh-aw.episode.id }}' or '{{ github.actor }}'. Values are exported to tracing backends and masked in runner logs.",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "resource-attributes": {
+              "type": "object",
+              "description": "Additional OTEL_RESOURCE_ATTRIBUTES entries to append to the standard gh-aw/GitHub resource attributes. Values may be static strings or GitHub Actions expressions such as '${{ github.repository }}'. Do not use secrets.* or vars.* expressions here: resource attributes are exported to external tracing backends and are not treated as secret values.",
+              "additionalProperties": {
+                "type": "string"
+              }
             },
             "github-app": {
               "description": "Optional runtime authentication for OTLP export. Supports GitHub App credentials (client-id/app-id + private-key) for token minting, or implicit GitHub OIDC mode when the github-app object is present without credentials.",
@@ -11485,7 +11701,7 @@
         },
         {
           "id": "copilot",
-          "copilot-sdk-driver": ".github/drivers/custom_copilot_sdk_driver.cjs",
+          "driver": ".github/drivers/custom_copilot_sdk_driver.cjs",
           "copilot-sdk": true,
           "version": "latest"
         }
@@ -11511,6 +11727,11 @@
             "model": {
               "type": "string",
               "description": "Optional specific LLM model to use (e.g., 'claude-3-5-sonnet-20241022', 'gpt-4'). Has sensible defaults and can typically be omitted."
+            },
+            "model-provider": {
+              "type": "string",
+              "enum": ["github", "anthropic", "openai"],
+              "description": "Optional inference provider override for this engine. Defaults to the engine's native provider (copilot: github, claude: anthropic, codex: openai, pi: github)."
             },
             "permission-mode": {
               "type": "string",
@@ -11731,10 +11952,10 @@
               "type": "boolean",
               "description": "Enables the experimental GitHub Copilot SDK integration (copilot engine only). When true, the harness starts a separate headless Copilot CLI sidecar on the configured localhost port and sets COPILOT_SDK_URI on child processes."
             },
-            "copilot-sdk-driver": {
+            "driver": {
               "type": "string",
               "pattern": "^(?:(?:\\.[A-Za-z0-9_]|[A-Za-z0-9_])[A-Za-z0-9._-]*)(?:/(?:(?:\\.[A-Za-z0-9_]|[A-Za-z0-9_])[A-Za-z0-9._-]*))*$",
-              "description": "Custom Copilot SDK driver script or command (copilot engine only). Setting this field implies `copilot-sdk: true`. Accepts a relative path from the workspace root with a supported language extension (.js, .cjs, .mjs, .py, .ts, .mts, .rb), e.g. `.github/drivers/my_driver.py`, or a bare command name without an extension for an arbitrary executable in PATH."
+              "description": "Custom inner driver script for engines that support driver mode (e.g. pi). Accepts a workspace-relative path ending with .js, .cjs, or .mjs (e.g. `.github/drivers/pi_agent_core_driver_sample_node.cjs`), or a bare filename without a path separator resolved from the gh-aw setup-action directory (e.g. `pi_agent_core_driver.cjs`)."
             }
           },
           "required": ["id"],

@@ -249,6 +249,21 @@ func buildActivationAppTokenPermissions(ctx *activationJobBuildContext) *Permiss
 			statusCommentIncludesDiscussions:  ctx.statusCommentDiscussions,
 		},
 	)
+	if hasWorkflowCallTrigger(ctx.data.On) && (ctx.hasReaction || ctx.hasStatusComment) {
+		addActivationInteractionPermissions(
+			appPerms,
+			activationInteractionPermissionsOptions{
+				hasReaction:                       ctx.hasReaction,
+				reactionIncludesIssues:            ctx.reactionIssues,
+				reactionIncludesPullRequests:      ctx.reactionPullRequests,
+				reactionIncludesDiscussions:       ctx.reactionDiscussions,
+				hasStatusComment:                  ctx.hasStatusComment,
+				statusCommentIncludesIssues:       ctx.statusCommentIssues,
+				statusCommentIncludesPullRequests: ctx.statusCommentPRs,
+				statusCommentIncludesDiscussions:  ctx.statusCommentDiscussions,
+			},
+		)
+	}
 	// Keep this aligned with addActivationLabelPermissions: app-token scopes are
 	// computed separately from GITHUB_TOKEN scopes because app-token permissions
 	// only apply to steps using the minted app token, while label permissions in
@@ -345,6 +360,28 @@ func (c *Compiler) buildActivationDailyAICGuardrailStep(data *WorkflowData) []st
 		steps = append(steps, fmt.Sprintf("          key: %s${{ github.run_id }}\n", cacheKeyPrefix))
 		steps = append(steps, fmt.Sprintf("          restore-keys: %s\n", cacheKeyPrefix))
 		steps = append(steps, "          path: /tmp/gh-aw/agentic-workflow-usage-cache.jsonl\n")
+		// Artifact-based fallback for cross-branch cache misses.
+		// GitHub Actions actions/cache is branch-scoped: caches written by the conclusion job
+		// on one PR branch are invisible to the activation job running on a different PR branch.
+		// This step downloads the most recent aic-usage-cache artifact uploaded by a prior
+		// conclusion job so that the guardrail script can skip per-run artifact downloads.
+		// Cache-miss detection is performed inside restore_aic_usage_cache_fallback.cjs using
+		// the cache restore outputs forwarded via env vars.
+		steps = append(steps, "      - name: Restore daily AIC usage cache (artifact fallback)\n")
+		steps = append(steps, "        id: restore-daily-aic-cache-fallback\n")
+		steps = append(steps, fmt.Sprintf("        if: %s\n", maxDailyAICreditsConfiguredIfExpr))
+		steps = append(steps, "        continue-on-error: true\n")
+		steps = append(steps, fmt.Sprintf("        uses: %s\n", getCachedActionPin("actions/github-script", data)))
+		steps = append(steps, "        env:\n")
+		steps = append(steps, "          GH_AW_RESTORE_DAILY_AIC_CACHE_HIT: ${{ steps.restore-daily-aic-cache.outputs.cache-hit }}\n")
+		steps = append(steps, "          GH_AW_RESTORE_DAILY_AIC_CACHE_MATCHED_KEY: ${{ steps.restore-daily-aic-cache.outputs.cache-matched-key }}\n")
+		steps = append(steps, "        with:\n")
+		steps = append(steps, fmt.Sprintf("          github-token: %s\n", c.resolveActivationToken(data)))
+		steps = append(steps, "          script: |\n")
+		steps = append(steps, "            const { setupGlobals } = require('"+SetupActionDestination+"/setup_globals.cjs');\n")
+		steps = append(steps, "            setupGlobals(core, github, context, exec, io, getOctokit);\n")
+		steps = append(steps, "            const { main } = require('"+SetupActionDestination+"/restore_aic_usage_cache_fallback.cjs');\n")
+		steps = append(steps, "            await main();\n")
 	}
 	steps = append(steps, "      - name: Check daily workflow token guardrail\n")
 	steps = append(steps, "        id: daily-effective-workflow-guardrail\n")
@@ -367,6 +404,28 @@ func (c *Compiler) buildActivationDailyAICGuardrailStep(data *WorkflowData) []st
 	steps = append(steps, "            const { main } = require('"+SetupActionDestination+"/check_daily_aic_workflow_guardrail.cjs');\n")
 	steps = append(steps, "            await main();\n")
 	return steps
+}
+
+func buildRuntimeFeaturesSummaryStep() []string {
+	return []string{
+		"      - name: Log runtime features\n",
+		"        env:\n",
+		"          GH_AW_RUNTIME_FEATURES_IS_SET: ${{ contains(toJSON(vars), '\"GH_AW_RUNTIME_FEATURES\":') }}\n",
+		"        run: |\n",
+		"          {\n",
+		"            echo \"## Runtime features\"\n",
+		"            echo\n",
+		"            if [[ \"$GH_AW_RUNTIME_FEATURES_IS_SET\" != \"true\" ]]; then\n",
+		"              echo \"_Not set_\"\n",
+		"            elif [[ -n \"$GH_AW_RUNTIME_FEATURES\" ]]; then\n",
+		"              echo '```text'\n",
+		"              printf '%s\\n' \"$GH_AW_RUNTIME_FEATURES\"\n",
+		"              echo '```'\n",
+		"            else\n",
+		"              echo \"_Empty string_\"\n",
+		"            fi\n",
+		"          } >> \"$GITHUB_STEP_SUMMARY\"\n",
+	}
 }
 
 // addActivationRepositoryAndOutputSteps appends checkout, validation, sanitization, comment, and lock steps.
@@ -704,6 +763,7 @@ func (c *Compiler) addActivationArtifactUploadStep(ctx *activationJobBuildContex
 func (c *Compiler) buildActivationPermissions(ctx *activationJobBuildContext) (string, error) {
 	permsMap := c.buildActivationBasePermissions(ctx)
 	c.addCentralizedCommandActivationPermissions(permsMap, ctx)
+	c.addWorkflowCallActivationPermissions(permsMap, ctx)
 	c.addActivationLabelPermissions(permsMap, ctx)
 	if err := c.addActivationScriptPermissions(permsMap, ctx); err != nil {
 		return "", err
@@ -753,6 +813,37 @@ func (c *Compiler) addCentralizedCommandActivationPermissions(permsMap map[Permi
 			})
 		}
 	}
+}
+
+// addWorkflowCallActivationPermissions supplements the activation job's permission map when the
+// workflow is triggered via workflow_call (i.e. it is used as a reusable workflow).
+//
+// At compile time it is impossible to know which GitHub event will fire in the *calling* workflow,
+// so the compiler cannot restrict permissions to a specific event type (e.g. "issues" or
+// "pull_request"). Instead it falls back to the broad permission set: all permission scopes that
+// the configured reactions / status-comments could ever need are granted, respecting the per-type
+// opt-out flags (reaction.issues, reaction.pull-requests, etc.).
+//
+// Because the caller event type is unknown at compile time, this path always uses the broad
+// fallback (addBroadActivationInteractionPermissions) instead of event-aware trigger parsing.
+func (c *Compiler) addWorkflowCallActivationPermissions(permsMap map[PermissionScope]PermissionLevel, ctx *activationJobBuildContext) {
+	if !hasWorkflowCallTrigger(ctx.data.On) {
+		return
+	}
+	if !ctx.hasReaction && !ctx.hasStatusComment {
+		return
+	}
+	compilerActivationJobLog.Print("workflow_call trigger detected; applying broad interaction permissions for reactions/status-comments")
+	addBroadActivationInteractionPermissions(permsMap, activationInteractionPermissionsOptions{
+		hasReaction:                       ctx.hasReaction,
+		reactionIncludesIssues:            ctx.reactionIssues,
+		reactionIncludesPullRequests:      ctx.reactionPullRequests,
+		reactionIncludesDiscussions:       ctx.reactionDiscussions,
+		hasStatusComment:                  ctx.hasStatusComment,
+		statusCommentIncludesIssues:       ctx.statusCommentIssues,
+		statusCommentIncludesPullRequests: ctx.statusCommentPRs,
+		statusCommentIncludesDiscussions:  ctx.statusCommentDiscussions,
+	})
 }
 
 func (c *Compiler) addActivationLabelPermissions(permsMap map[PermissionScope]PermissionLevel, ctx *activationJobBuildContext) {

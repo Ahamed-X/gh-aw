@@ -1,4 +1,5 @@
 ---
+private: true
 on:
   schedule: daily
   workflow_dispatch: null
@@ -51,6 +52,8 @@ tools:
     - "*.txt"
     max-file-size: 51200
 tracker-id: daily-testify-uber-super-expert
+features:
+  gh-aw-detection: true
 ---
 
 {{#runtime-import? .github/shared-instructions.md}}

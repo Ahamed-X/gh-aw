@@ -16,6 +16,7 @@ const { formatAICCredits } = require("./daily_aic_workflow_helpers.cjs");
 const { formatAIC } = require("./model_costs.cjs");
 const { parseTokenUsageJsonl, generateTokenUsageSummary } = require("./parse_mcp_gateway_log.cjs");
 const { readDedupedTokenUsage, TOKEN_USAGE_PATHS } = require("./parse_token_usage.cjs");
+const { extractShellCommandFromToolData } = require("./tool_call_details.cjs");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -29,6 +30,9 @@ const DEFAULT_OTEL_JSONL_PATH = "/tmp/gh-aw/otel.jsonl";
 const FAILURE_CATEGORIES_PATH = "/tmp/gh-aw/failure_categories.json";
 const GITHUB_API_VERSION = "2022-11-28";
 const COPILOT_SESSION_STATE_DIR = path.join(os.tmpdir(), "gh-aw", "sandbox", "agent", "logs", "copilot-session-state");
+const RECENT_TOOL_CALLS_WITH_COMMAND_PREVIEW = new Set(["bash", "shell"]);
+const ELLIPSIS = "...";
+const ELLIPSIS_LENGTH = ELLIPSIS.length;
 // Engine-side 429/rate-limit signatures:
 // - HTTP 429 accompanied by "too many requests"/"rate limit" phrasing
 // - provider error codes like rate_limit_error / rate_limit_exceeded
@@ -36,6 +40,7 @@ const COPILOT_SESSION_STATE_DIR = path.join(os.tmpdir(), "gh-aw", "sandbox", "ag
 // - retry wrapper text that includes the canonical "Failed to get response..." phrase
 const ENGINE_RATE_LIMIT_429_RE =
   /(?:\b429\b[\s\S]{0,120}(?:too many requests|rate[\s-]*limit)|\brate_limit_(?:error|exceeded)\b|capierror:\s*429|failed to get response from the ai model[\s\S]{0,120}\b429\b|exceeded your rate limit for utility models)/i;
+const ENGINE_MAX_RUNS_EXCEEDED_RE = /(?:\bmax_runs_exceeded\b|\bmaximum\s+llm\s+invocations\s+exceeded\b)/i;
 
 /**
  * Parse action failure issue expiration from environment.
@@ -1014,14 +1019,40 @@ function loadMissingDataMessages(items) {
 }
 
 /**
+ * Resolve whether any cache-memory restore step matched a cache entry.
+ * Reads per-cache restore outputs propagated via GH_AW_CACHE_MEMORY_RESTORE_<index>_* env vars.
+ * @returns {boolean}
+ */
+function resolveCacheMemoryRestored() {
+  for (const [key, value] of Object.entries(process.env)) {
+    if (!key.startsWith("GH_AW_CACHE_MEMORY_RESTORE_")) {
+      continue;
+    }
+    if (key.endsWith("_MATCHED_KEY") && String(value || "").trim() !== "") {
+      return true;
+    }
+    if (
+      key.endsWith("_CACHE_HIT") &&
+      String(value || "")
+        .trim()
+        .toLowerCase() === "true"
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Build missing_data context string for display in failure issues/comments.
- * When cache-memory is enabled and a cache_miss is detected, appends a
- * configuration-problem warning to the context.
+ * When cache-memory is enabled, a restore matched, and a cache_miss is detected,
+ * appends a configuration-problem warning to the context.
  * @param {boolean} cacheMemoryEnabled - Whether cache-memory is configured for this workflow
+ * @param {boolean} cacheMemoryRestored - Whether cache restore matched an existing cache key in this run
  * @param {Array<any>} [items] - Optional pre-loaded agent output items. When provided, avoids re-reading the output file.
  * @returns {string} Formatted missing data context
  */
-function buildMissingDataContext(cacheMemoryEnabled, items) {
+function buildMissingDataContext(cacheMemoryEnabled, cacheMemoryRestored, items) {
   const missingDataMessages = loadMissingDataMessages(items);
 
   if (missingDataMessages.length === 0) {
@@ -1030,13 +1061,14 @@ function buildMissingDataContext(cacheMemoryEnabled, items) {
 
   core.info(`Found ${missingDataMessages.length} missing_data message(s)`);
 
-  // Detect cache_miss: if cache-memory is available and the agent reported a cache miss,
+  // Detect cache_miss: if cache-memory restore matched and the agent reported a cache miss,
   // this indicates the prompt is referencing an incorrect file path within the cache directory.
   const hasCacheMiss = missingDataMessages.some(m => m.reason === "cache_memory_miss");
 
   // When cache-memory is configured and cache_miss is present, avoid repeating the same
   // signal in the generic "Missing Data" section. Keep the specialised cache warning below.
-  const displayableMissingData = cacheMemoryEnabled && hasCacheMiss ? missingDataMessages.filter(m => m.reason !== "cache_memory_miss") : missingDataMessages;
+  const shouldShowCacheWarning = cacheMemoryEnabled && cacheMemoryRestored && hasCacheMiss;
+  const displayableMissingData = shouldShowCacheWarning ? missingDataMessages.filter(m => m.reason !== "cache_memory_miss") : missingDataMessages;
 
   let context = "";
   if (displayableMissingData.length > 0) {
@@ -1046,8 +1078,8 @@ function buildMissingDataContext(cacheMemoryEnabled, items) {
     context += "\n\n";
   }
 
-  if (cacheMemoryEnabled && hasCacheMiss) {
-    core.info("Cache-miss detected despite cache-memory being available — likely a configuration problem");
+  if (shouldShowCacheWarning) {
+    core.info("Cache-miss detected after a successful cache restore — likely a configuration problem");
     const templatePath = getPromptPath("cache_memory_miss.md");
     context += "\n" + renderTemplateFromFile(templatePath, {}) + "\n";
   }
@@ -1144,6 +1176,48 @@ function normalizeDeniedPermissionCommand(command) {
     return `shell(${shellHeredocMatch[1]} ...)`;
   }
   return cmd;
+}
+
+/**
+ * Collapse tool call details to a compact single-line preview.
+ * @param {string} value
+ * @param {number} [maxLen]
+ * @returns {string}
+ */
+function normalizeToolCallPreview(value, maxLen = 120) {
+  const singleLine = String(value || "")
+    .replace(/`/g, "'")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!singleLine) return "";
+  if (singleLine.length <= maxLen) return singleLine;
+  return `${singleLine.slice(0, maxLen - ELLIPSIS_LENGTH)}${ELLIPSIS}`;
+}
+
+/**
+ * Best-effort extraction of a shell command preview from a tool.execution_start payload.
+ * @param {Record<string, any>} data
+ * @returns {string}
+ */
+function extractShellCommandPreview(data) {
+  return normalizeToolCallPreview(extractShellCommandFromToolData(data));
+}
+
+/**
+ * Format a compact display value for a recent tool call entry.
+ * @param {string} toolName
+ * @param {string} mcpServerName
+ * @param {Record<string, any>} data
+ * @returns {string}
+ */
+function formatRecentToolCall(toolName, mcpServerName, data) {
+  const base = mcpServerName ? `${mcpServerName}.${toolName}` : toolName;
+  const normalizedToolName = typeof toolName === "string" ? toolName.toLowerCase() : "";
+  if (!RECENT_TOOL_CALLS_WITH_COMMAND_PREVIEW.has(normalizedToolName)) {
+    return base;
+  }
+  const commandPreview = extractShellCommandPreview(data);
+  return commandPreview ? `${base}(${commandPreview})` : base;
 }
 
 /**
@@ -1292,7 +1366,7 @@ function loadToolDenialsExceededEvents() {
             const toolName = typeof parsed.data.toolName === "string" ? parsed.data.toolName.trim() : "";
             if (toolName) {
               const mcpServerName = typeof parsed.data.mcpServerName === "string" ? parsed.data.mcpServerName.trim() : "";
-              recentToolCalls.push(mcpServerName ? `${mcpServerName}.${toolName}` : toolName);
+              recentToolCalls.push(formatRecentToolCall(toolName, mcpServerName, parsed.data));
               if (recentToolCalls.length > 5) recentToolCalls.shift();
             }
             continue;
@@ -1539,6 +1613,20 @@ function hasEngineRateLimit429Signal(content) {
 }
 
 /**
+ * Detect max-runs guardrail failures in text payloads.
+ * Returns true when content includes either the `max_runs_exceeded` error type
+ * or the "Maximum LLM invocations exceeded" message fragment.
+ * @param {string|null|undefined} content
+ * @returns {boolean}
+ */
+function hasEngineMaxRunsExceededSignal(content) {
+  if (!content) {
+    return false;
+  }
+  return ENGINE_MAX_RUNS_EXCEEDED_RE.test(content);
+}
+
+/**
  * Detect HTTP 429/rate-limit engine failures from OTLP JSONL mirror payloads.
  * @param {string} [otelJsonlPathOverride]
  * @returns {boolean}
@@ -1564,6 +1652,17 @@ function hasEngineRateLimit429InOTELMirror(otelJsonlPathOverride) {
 function buildEngineRateLimit429Context(engineLabel) {
   const normalizedEngineLabel = engineLabel.trim() || "AI";
   return "\n" + renderPromptTemplate("engine_rate_limit_429.md", { engine_label: normalizedEngineLabel });
+}
+
+/**
+ * Build dedicated context for max-runs guardrail failures.
+ * Renders the max-runs-exceeded prompt template with the active engine label.
+ * @param {string} [engineLabel]
+ * @returns {string}
+ */
+function buildEngineMaxRunsExceededContext(engineLabel) {
+  const normalizedEngineLabel = (typeof engineLabel === "string" ? engineLabel : "").trim() || "AI";
+  return "\n" + renderPromptTemplate("engine_max_runs_exceeded.md", { engine_label: normalizedEngineLabel });
 }
 
 /**
@@ -2065,6 +2164,11 @@ function buildEngineFailureContext(options = {}) {
       return buildEngineRateLimit429Context(engineLabel);
     }
 
+    if (hasEngineMaxRunsExceededSignal(logContent)) {
+      core.info("Detected engine max-runs guardrail signal — using dedicated context message");
+      return buildEngineMaxRunsExceededContext(engineLabel);
+    }
+
     const errorMessages = new Set();
 
     for (const line of lines) {
@@ -2478,6 +2582,40 @@ async function main() {
     const unknownModelAICredits = unknownModelAICreditsFromAudit || (unknownModelAICreditsFromOutput && agentConclusion === "failure");
     const pushRepoMemoryResult = process.env.GH_AW_PUSH_REPO_MEMORY_RESULT || "";
     const reportFailureAsIssue = process.env.GH_AW_FAILURE_REPORT_AS_ISSUE !== "false"; // Default to true
+    // Parse included categories filter for report-failure-as-issue (optional JSON array of category strings)
+    const failureCategoriesFilterRaw = process.env.GH_AW_FAILURE_CATEGORIES_FILTER || "";
+    let failureCategoriesFilter = null;
+    if (failureCategoriesFilterRaw) {
+      try {
+        failureCategoriesFilter = JSON.parse(failureCategoriesFilterRaw);
+        if (!Array.isArray(failureCategoriesFilter)) {
+          core.warning(`GH_AW_FAILURE_CATEGORIES_FILTER is not an array, ignoring: ${failureCategoriesFilterRaw}`);
+          failureCategoriesFilter = null;
+        } else {
+          core.info(`Failure categories include filter enabled: ${failureCategoriesFilter.join(", ")}`);
+        }
+      } catch (parseError) {
+        core.warning(`Failed to parse GH_AW_FAILURE_CATEGORIES_FILTER, ignoring: ${getErrorMessage(parseError)}`);
+        failureCategoriesFilter = null;
+      }
+    }
+    // Parse excluded categories filter for report-failure-as-issue (optional JSON array of category strings)
+    const failureExcludedCategoriesFilterRaw = process.env.GH_AW_FAILURE_EXCLUDED_CATEGORIES_FILTER || "";
+    let failureExcludedCategoriesFilter = null;
+    if (failureExcludedCategoriesFilterRaw) {
+      try {
+        failureExcludedCategoriesFilter = JSON.parse(failureExcludedCategoriesFilterRaw);
+        if (!Array.isArray(failureExcludedCategoriesFilter)) {
+          core.warning(`GH_AW_FAILURE_EXCLUDED_CATEGORIES_FILTER is not an array, ignoring: ${failureExcludedCategoriesFilterRaw}`);
+          failureExcludedCategoriesFilter = null;
+        } else {
+          core.info(`Failure categories exclude filter enabled: ${failureExcludedCategoriesFilter.join(", ")}`);
+        }
+      } catch (parseError) {
+        core.warning(`Failed to parse GH_AW_FAILURE_EXCLUDED_CATEGORIES_FILTER, ignoring: ${getErrorMessage(parseError)}`);
+        failureExcludedCategoriesFilter = null;
+      }
+    }
     // Feature flags: control whether missing_tool/missing_data signals trigger agent failure handling.
     // Defaults to true (new behavior); set to false to restore pre-2026 behavior where these signals
     // are only shown in output footers / separate issues without activating the failure code path.
@@ -2502,6 +2640,7 @@ async function main() {
     // Cache-memory availability flag — set when cache-memory is configured for the workflow.
     // Used to detect cache-miss misconfigurations reported by the agent.
     const cacheMemoryEnabled = process.env.GH_AW_CACHE_MEMORY_ENABLED === "true";
+    const cacheMemoryRestored = cacheMemoryEnabled ? resolveCacheMemoryRestored() : false;
 
     // Collect repo-memory validation errors from all memory configurations
     const repoMemoryValidationErrors = [];
@@ -2549,6 +2688,7 @@ async function main() {
     core.info(`Lockdown check failed: ${hasLockdownCheckFailed}`);
     core.info(`Stale lock file check failed: ${hasStaleLockFileFailed}`);
     core.info(`Cache memory enabled: ${cacheMemoryEnabled}`);
+    core.info(`Cache memory restored (from restore outputs): ${cacheMemoryRestored}`);
     core.info(`Missing tool report-as-failure: ${missingToolReportAsFailure}`);
     core.info(`Missing data report-as-failure: ${missingDataReportAsFailure}`);
 
@@ -2673,24 +2813,26 @@ async function main() {
     }
 
     // Detect cache-miss misconfiguration: the agent reported a missing_data with reason
-    // "cache_memory_miss" while cache-memory was configured and available.  This indicates the
-    // prompt is referencing an incorrect path inside the cache directory.
+    // "cache_memory_miss" after a cache restore matched. This indicates the prompt
+    // is referencing an incorrect path inside the cache directory.
     // Check for items regardless of agentOutputResult.success so that cache-miss signals
     // emitted alongside other output are not missed when the agent job also fails.
     let hasCacheMissMisconfiguration = false;
-    if (cacheMemoryEnabled && agentOutputResult.items) {
+    if (cacheMemoryEnabled && cacheMemoryRestored && agentOutputResult.items) {
       const cacheMissItems = agentOutputResult.items.filter(item => item.type === "missing_data" && item.reason === "cache_memory_miss");
       if (cacheMissItems.length > 0) {
         hasCacheMissMisconfiguration = true;
-        core.info(`Cache-miss misconfiguration detected: ${cacheMissItems.length} missing_data item(s) with reason "cache_memory_miss" despite cache-memory being available`);
+        core.info(`Cache-miss misconfiguration detected: ${cacheMissItems.length} missing_data item(s) with reason "cache_memory_miss" after cache restore matched an existing key`);
       }
+    } else if (cacheMemoryEnabled && !cacheMemoryRestored) {
+      core.info("Cache-memory is configured but no cache restore match was found; cache_memory_miss is treated as expected cache miss (actions/cache branch scoping and first-run behavior)");
     }
 
     // Only proceed if the agent job actually failed OR timed out OR there are assignment errors OR
     // create_discussion errors OR code-push failures OR push_repo_memory failed OR missing safe outputs
     // OR a GitHub App token minting step failed OR the lockdown check failed OR copilot assignment failed
     // OR the stale lock file check failed OR the agent reported task incompletion via report_incomplete
-    // OR a cache-miss was detected despite cache-memory being available (configuration problem)
+    // OR a cache-miss was detected after cache restore succeeded (configuration problem)
     // OR the agent reported missing tools or missing data (treated as agent failures by default).
     // BUT skip if we only have noop outputs (that's a successful no-action scenario)
     if (
@@ -2850,6 +2992,53 @@ async function main() {
       core.warning(`Failed to write failure categories: ${getErrorMessage(writeError)}`);
     }
 
+    // Check if failure categories match the filter (if configured)
+    // Logic:
+    // 1. If only excluded categories are specified: report all EXCEPT those categories
+    // 2. If only included categories are specified: report ONLY those categories
+    // 3. If both are specified: report categories that are included AND not excluded
+    if (failureCategoriesFilter || failureExcludedCategoriesFilter) {
+      const includeCategories = Array.isArray(failureCategoriesFilter) ? failureCategoriesFilter : [];
+      const excludeCategories = Array.isArray(failureExcludedCategoriesFilter) ? failureExcludedCategoriesFilter : [];
+      const hasIncludeFilter = includeCategories.length > 0;
+      const hasExcludeFilter = excludeCategories.length > 0;
+
+      let shouldCreateIssue = false;
+
+      if (hasIncludeFilter && hasExcludeFilter) {
+        // Both filters: must match include AND not match exclude
+        const hasIncludedCategory = failureCategories.some(cat => includeCategories.includes(cat));
+        const hasExcludedCategory = failureCategories.some(cat => excludeCategories.includes(cat));
+        shouldCreateIssue = hasIncludedCategory && !hasExcludedCategory;
+        if (!shouldCreateIssue) {
+          core.info(`Skipping failure issue creation: categories don't match filters. Categories: [${failureCategories.join(", ")}], Include: [${includeCategories.join(", ")}], Exclude: [${excludeCategories.join(", ")}]`);
+        } else {
+          core.info(`Failure categories match filters, proceeding with issue creation. Include: [${includeCategories.join(", ")}], Exclude: [${excludeCategories.join(", ")}]`);
+        }
+      } else if (hasIncludeFilter) {
+        // Only include filter: must match at least one included category
+        shouldCreateIssue = failureCategories.some(cat => includeCategories.includes(cat));
+        if (!shouldCreateIssue) {
+          core.info(`Skipping failure issue creation: no failure categories match include filter. Categories: [${failureCategories.join(", ")}], Include: [${includeCategories.join(", ")}]`);
+        } else {
+          core.info(`Failure categories match include filter, proceeding with issue creation. Matching categories: [${failureCategories.filter(cat => includeCategories.includes(cat)).join(", ")}]`);
+        }
+      } else if (hasExcludeFilter) {
+        // Only exclude filter: must NOT match any excluded category
+        const hasExcludedCategory = failureCategories.some(cat => excludeCategories.includes(cat));
+        shouldCreateIssue = !hasExcludedCategory;
+        if (!shouldCreateIssue) {
+          core.info(`Skipping failure issue creation: failure categories match exclude filter. Categories: [${failureCategories.join(", ")}], Exclude: [${excludeCategories.join(", ")}]`);
+        } else {
+          core.info(`Failure categories don't match exclude filter, proceeding with issue creation. Categories: [${failureCategories.join(", ")}]`);
+        }
+      }
+
+      if (!shouldCreateIssue) {
+        return;
+      }
+    }
+
     core.info(`Checking for existing issue with precise failure metadata for title: "${issueTitle}"`);
 
     try {
@@ -2913,7 +3102,7 @@ async function main() {
         const pushRepoMemoryFailureContext = buildPushRepoMemoryFailureContext(hasPushRepoMemoryFailure, repoMemoryPatchSizeExceededIDs, runUrl);
 
         // Build missing_data context (only when report-as-failure is enabled for this signal type)
-        const missingDataContext = missingDataReportAsFailure ? buildMissingDataContext(cacheMemoryEnabled, agentOutputResult.items) : "";
+        const missingDataContext = missingDataReportAsFailure ? buildMissingDataContext(cacheMemoryEnabled, cacheMemoryRestored, agentOutputResult.items) : "";
 
         // Build tool-denials-exceeded guard context from events.jsonl
         const toolDenialsExceededContext = buildToolDenialsExceededContext(toolDenialsExceededEvents, workflowID);
@@ -3136,7 +3325,7 @@ async function main() {
         const pushRepoMemoryFailureContext = buildPushRepoMemoryFailureContext(hasPushRepoMemoryFailure, repoMemoryPatchSizeExceededIDs, runUrl);
 
         // Build missing_data context (only when report-as-failure is enabled for this signal type)
-        const missingDataContext = missingDataReportAsFailure ? buildMissingDataContext(cacheMemoryEnabled, agentOutputResult.items) : "";
+        const missingDataContext = missingDataReportAsFailure ? buildMissingDataContext(cacheMemoryEnabled, cacheMemoryRestored, agentOutputResult.items) : "";
 
         // Build tool-denials-exceeded guard context from events.jsonl
         const toolDenialsExceededContext = buildToolDenialsExceededContext(toolDenialsExceededEvents, workflowID);
@@ -3335,6 +3524,7 @@ module.exports = {
   buildMCPPolicyErrorContext,
   buildModelNotSupportedErrorContext,
   buildMissingDataContext,
+  resolveCacheMemoryRestored,
   buildMissingToolContext,
   buildPermissionDeniedContext,
   normalizeDeniedPermissionCommand,
@@ -3343,8 +3533,10 @@ module.exports = {
   buildCredentialAuthErrorContext,
   buildAICreditsRateLimitErrorContext,
   buildUnknownModelAICreditsContext,
+  hasEngineMaxRunsExceededSignal,
   hasEngineRateLimit429Signal,
   hasEngineRateLimit429InOTELMirror,
+  buildEngineMaxRunsExceededContext,
   buildEngineRateLimit429Context,
   readTokenUsageMarkdown,
   parseFirewallAuthErrors,

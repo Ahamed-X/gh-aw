@@ -13,6 +13,7 @@ import (
 
 	"github.com/github/gh-aw/pkg/jsonutil"
 	"github.com/github/gh-aw/pkg/logger"
+	"github.com/github/gh-aw/pkg/setutil"
 	"github.com/github/gh-aw/pkg/typeutil"
 )
 
@@ -218,7 +219,8 @@ func computeFrontmatterHashFromContent(content string, parsedFrontmatter map[str
 func extractRelevantTemplateExpressions(markdown string) []string {
 	frontmatterHashLog.Printf("Extracting relevant template expressions from markdown: size=%d bytes", len(markdown))
 	var expressions []string
-	seen := make(map[string]bool)
+	seen := make(map[string]struct {
+	})
 
 	// Regex to match ${{ ... }} expressions
 	matches := templateExpressionRegex.FindAllStringSubmatch(markdown, -1)
@@ -235,9 +237,10 @@ func extractRelevantTemplateExpressions(markdown string) []string {
 			// Store the full expression including ${{ }}
 			expr := match[0]
 			// Deduplicate expressions
-			if !seen[expr] {
+			if !setutil.Contains(seen, expr) {
 				expressions = append(expressions, expr)
-				seen[expr] = true
+				seen[expr] = struct {
+				}{}
 			}
 		}
 	}
@@ -411,7 +414,8 @@ func indentationOf(line string) int {
 
 // processImportsTextBased processes imports from frontmatter using text-based parsing
 // Returns: importedFiles (list of import paths), importedFrontmatterTexts (list of frontmatter texts)
-func processImportsTextBased(frontmatterText, baseDir string, visited map[string]bool, fileReader FileReader) ([]string, []string, error) {
+func processImportsTextBased(frontmatterText, baseDir string, visited map[string]struct {
+}, fileReader FileReader) ([]string, []string, error) {
 	var importedFiles []string
 	var importedFrontmatterTexts []string
 
@@ -432,11 +436,12 @@ func processImportsTextBased(frontmatterText, baseDir string, visited map[string
 		fullPath := filepath.Join(baseDir, importPath)
 
 		// Skip if already visited (cycle detection)
-		if visited[fullPath] {
+		if setutil.Contains(visited, fullPath) {
 			frontmatterHashLog.Printf("Skipping already-visited import (cycle detection): %s", fullPath)
 			continue
 		}
-		visited[fullPath] = true
+		visited[fullPath] = struct {
+		}{}
 
 		// Read imported file using the provided file reader
 		content, err := fileReader(fullPath)
@@ -475,7 +480,8 @@ func processImportsTextBased(frontmatterText, baseDir string, visited map[string
 
 // collectImportedBodies processes imports from frontmatter and returns the body texts of all
 // transitively imported files. Used to include imported file bodies in the body hash.
-func collectImportedBodies(frontmatterText, baseDir string, visited map[string]bool, fileReader FileReader) ([]string, error) {
+func collectImportedBodies(frontmatterText, baseDir string, visited map[string]struct {
+}, fileReader FileReader) ([]string, error) {
 	var importedBodyTexts []string
 
 	imports := extractImportsFromText(frontmatterText)
@@ -488,10 +494,11 @@ func collectImportedBodies(frontmatterText, baseDir string, visited map[string]b
 	for _, importPath := range imports {
 		fullPath := filepath.Join(baseDir, importPath)
 
-		if visited[fullPath] {
+		if setutil.Contains(visited, fullPath) {
 			continue
 		}
-		visited[fullPath] = true
+		visited[fullPath] = struct {
+		}{}
 
 		content, err := fileReader(fullPath)
 		if err != nil {
@@ -526,7 +533,8 @@ func ComputeBodyHashFromParsedContent(markdownBody, frontmatterText, baseDir str
 
 	normalizedBody := normalizeFrontmatterText(markdownBody)
 
-	visited := make(map[string]bool)
+	visited := make(map[string]struct {
+	})
 	importedBodies, err := collectImportedBodies(frontmatterText, baseDir, visited, fileReader)
 	if err != nil {
 		return "", fmt.Errorf("failed to process imports for body hash: %w", err)
@@ -575,7 +583,8 @@ func computeFrontmatterHashTextBasedWithReader(frontmatterText, markdown, baseDi
 	frontmatterHashLog.Print("Computing frontmatter hash using text-based approach")
 
 	// Process imports using text-based parsing with custom file reader
-	visited := make(map[string]bool)
+	visited := make(map[string]struct {
+	})
 	importedFiles, importedFrontmatterTexts, err := processImportsTextBased(frontmatterText, baseDir, visited, fileReader)
 	if err != nil {
 		return "", fmt.Errorf("failed to process imports: %w", err)

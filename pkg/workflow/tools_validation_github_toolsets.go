@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/github/gh-aw/pkg/parser"
+	"github.com/github/gh-aw/pkg/setutil"
 	"github.com/github/gh-aw/pkg/stringutil"
 )
 
@@ -20,9 +21,11 @@ func validateGitHubToolsAgainstToolsetsCore(allowedTools []string, enabledToolse
 	}
 
 	// Create a set of enabled toolsets for fast lookup
-	enabledSet := make(map[string]bool)
+	enabledSet := make(map[string]struct {
+	})
 	for _, toolset := range enabledToolsets {
-		enabledSet[toolset] = true
+		enabledSet[toolset] = struct {
+		}{}
 	}
 	githubToolToToolsetLog.Printf("Enabled toolsets: %v", enabledToolsets)
 
@@ -65,7 +68,7 @@ func validateGitHubToolsAgainstToolsetsCore(allowedTools []string, enabledToolse
 			continue
 		}
 
-		if !enabledSet[requiredToolset] {
+		if !setutil.Contains(enabledSet, requiredToolset) {
 			githubToolToToolsetLog.Printf("Tool %s requires missing toolset: %s", tool, requiredToolset)
 			missingToolsets[requiredToolset] = append(missingToolsets[requiredToolset], tool)
 		}

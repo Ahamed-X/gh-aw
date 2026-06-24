@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "🧪"
 name: Smoke Multi PR
 description: Test creating multiple pull requests in a single workflow run
@@ -49,6 +50,8 @@ safe-outputs:
 timeout-minutes: 10
 imports:
   - shared/otlp.md
+features:
+  gh-aw-detection: true
 ---
 
 # Smoke Test: Multiple Pull Request Creation

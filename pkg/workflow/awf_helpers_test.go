@@ -638,6 +638,32 @@ func TestBuildAWFArgsAllowHostPorts(t *testing.T) {
 
 		assert.NotContains(t, argsStr, "--allow-host-ports", "Should skip --allow-host-ports for AWF versions below minimum support")
 	})
+
+	t.Run("skips host-access flags when network isolation is enabled", func(t *testing.T) {
+		config := AWFCommandConfig{
+			EngineName: "copilot",
+			WorkflowData: &WorkflowData{
+				Name:         "test-workflow",
+				EngineConfig: &EngineConfig{ID: "copilot"},
+				NetworkPermissions: &NetworkPermissions{
+					Firewall: &FirewallConfig{Enabled: true},
+				},
+				SandboxConfig: &SandboxConfig{
+					Agent: &AgentSandboxConfig{
+						Type:             SandboxTypeAWF,
+						NetworkIsolation: true,
+					},
+				},
+			},
+			AllowedDomains: "github.com",
+		}
+
+		args := BuildAWFArgs(config)
+		argsStr := strings.Join(args, " ")
+
+		assert.NotContains(t, argsStr, "--enable-host-access", "Should skip --enable-host-access in network isolation mode")
+		assert.NotContains(t, argsStr, "--allow-host-ports", "Should skip --allow-host-ports in network isolation mode")
+	})
 }
 
 // TestBuildAWFArgsDiagnosticLogs tests that BuildAWFArgs includes --diagnostic-logs
@@ -909,6 +935,71 @@ func TestGetCopilotAPITarget(t *testing.T) {
 	}
 }
 
+func TestGetCopilotAllowlistTargets(t *testing.T) {
+	tests := []struct {
+		name         string
+		workflowData *WorkflowData
+		expected     []string
+	}{
+		{
+			name: "includes BYOK provider host and api-target when both are configured",
+			workflowData: &WorkflowData{
+				EngineConfig: &EngineConfig{
+					ID:        "copilot",
+					APITarget: "api.acme.ghe.com",
+					Env: map[string]string{
+						constants.CopilotProviderBaseURL: "https://llm.corp.example.com/v1",
+					},
+				},
+			},
+			expected: []string{"llm.corp.example.com", "api.acme.ghe.com"},
+		},
+		{
+			name: "includes only BYOK provider host when no copilot api target is configured",
+			workflowData: &WorkflowData{
+				EngineConfig: &EngineConfig{
+					ID: "copilot",
+					Env: map[string]string{
+						constants.CopilotProviderBaseURL: "http://localhost:11434/v1",
+					},
+				},
+			},
+			expected: []string{"localhost:11434"},
+		},
+		{
+			name: "deduplicates identical provider and api targets",
+			workflowData: &WorkflowData{
+				EngineConfig: &EngineConfig{
+					ID:        "copilot",
+					APITarget: "llm.corp.example.com",
+					Env: map[string]string{
+						constants.CopilotProviderBaseURL: "https://llm.corp.example.com/v1",
+					},
+				},
+			},
+			expected: []string{"llm.corp.example.com"},
+		},
+		{
+			name: "skips provider host extraction when BYOK base URL is a GitHub expression",
+			workflowData: &WorkflowData{
+				EngineConfig: &EngineConfig{
+					ID: "copilot",
+					Env: map[string]string{
+						constants.CopilotProviderBaseURL: "${{ secrets.PROVIDER_BASE_URL }}",
+					},
+				},
+			},
+			expected: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, GetCopilotAllowlistTargets(tt.workflowData), "GetCopilotAllowlistTargets should return expected targets for %s", tt.name)
+		})
+	}
+}
+
 // TestCopilotEngineIncludesCopilotAPITargetFromEnvVar tests that the Copilot engine execution
 // step includes the copilot API target in the JSON config when GITHUB_COPILOT_BASE_URL is
 // configured in engine.env.
@@ -1056,6 +1147,36 @@ func TestBuildAWFArgsCliProxy(t *testing.T) {
 		assert.Contains(t, argsStr, "/tmp/gh-aw/difc-proxy-tls/ca.crt", "Should use the correct CA cert path")
 		assert.NotContains(t, argsStr, "--enable-cli-proxy", "Should not include deprecated --enable-cli-proxy")
 		assert.NotContains(t, argsStr, "--cli-proxy-policy", "Should not include deprecated --cli-proxy-policy")
+	})
+
+	t.Run("uses internal cli proxy host when network isolation is enabled", func(t *testing.T) {
+		config := AWFCommandConfig{
+			EngineName: "copilot",
+			WorkflowData: &WorkflowData{
+				Name: "test-workflow",
+				EngineConfig: &EngineConfig{
+					ID: "copilot",
+				},
+				NetworkPermissions: &NetworkPermissions{
+					Firewall: &FirewallConfig{Enabled: true, Version: "v0.26.0"},
+				},
+				SandboxConfig: &SandboxConfig{
+					Agent: &AgentSandboxConfig{
+						Type:             SandboxTypeAWF,
+						NetworkIsolation: true,
+					},
+				},
+				Features: map[string]any{"cli-proxy": true},
+			},
+			AllowedDomains: "github.com",
+		}
+
+		args := BuildAWFArgs(config)
+		argsStr := strings.Join(args, " ")
+
+		assert.Contains(t, argsStr, "--difc-proxy-host", "Should include --difc-proxy-host when cli-proxy is enabled")
+		assert.Contains(t, argsStr, "awmg-cli-proxy:18443", "Should use internal awf-net CLI proxy address in isolation mode")
+		assert.NotContains(t, argsStr, "host.docker.internal:18443", "Should not use host.docker.internal in isolation mode")
 	})
 
 	t.Run("does not include cli-proxy flags for copilot by default", func(t *testing.T) {
@@ -1413,8 +1534,110 @@ func TestAWFSupportsTokenSteering(t *testing.T) {
 	}
 }
 
-// TestGetGeminiAPITarget tests the GetGeminiAPITarget helper that resolves the effective
-// Gemini API target from GEMINI_API_BASE_URL in engine.env or the default endpoint.
+// TestAWFSupportsChrootConfig tests the awfSupportsChrootConfig version gate.
+func TestAWFSupportsChrootConfig(t *testing.T) {
+	tests := []struct {
+		name           string
+		firewallConfig *FirewallConfig
+		want           bool
+	}{
+		{
+			name:           "nil firewall config returns true (uses default version)",
+			firewallConfig: nil,
+			want:           true,
+		},
+		{
+			name:           "empty version returns true (uses default version)",
+			firewallConfig: &FirewallConfig{},
+			want:           true,
+		},
+		{
+			name:           "latest returns true",
+			firewallConfig: &FirewallConfig{Version: "latest"},
+			want:           true,
+		},
+		{
+			name:           "v0.27.1 supports chroot config (exact minimum version)",
+			firewallConfig: &FirewallConfig{Version: "v0.27.1"},
+			want:           true,
+		},
+		{
+			name:           "v0.27.0 does not support chroot config",
+			firewallConfig: &FirewallConfig{Version: "v0.27.0"},
+			want:           false,
+		},
+		{
+			name:           "v0.25.44 (old) does not support chroot config",
+			firewallConfig: &FirewallConfig{Version: "v0.25.44"},
+			want:           false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := awfSupportsChrootConfig(tt.firewallConfig)
+			assert.Equal(t, tt.want, got, "awfSupportsChrootConfig result")
+		})
+	}
+}
+
+// TestBuildAWFCommand_IncludesChrootInjectScript verifies that BuildAWFCommand
+// includes the chroot injection script in the generated run step when the AWF
+// version supports it.
+func TestBuildAWFCommand_IncludesChrootInjectScript(t *testing.T) {
+	t.Run("chroot inject script present when AWF version supports it", func(t *testing.T) {
+		config := AWFCommandConfig{
+			EngineName:    "copilot",
+			EngineCommand: "copilot --prompt-file /tmp/prompt.txt",
+			LogFile:       "/tmp/gh-aw/agent-stdio.log",
+			WorkflowData: &WorkflowData{
+				EngineConfig: &EngineConfig{ID: "copilot"},
+				NetworkPermissions: &NetworkPermissions{
+					Firewall: &FirewallConfig{
+						Enabled: true,
+						Version: string(constants.AWFChrootConfigMinVersion),
+					},
+				},
+			},
+		}
+		command := BuildAWFCommand(config)
+		assert.Contains(t, command, "binariesSourcePath",
+			"command should include chroot inject script reference to binariesSourcePath")
+		assert.Contains(t, command, awfArcDindChrootBinariesSourcePath,
+			"command should include the expected binariesSourcePath constant")
+		assert.Contains(t, command, awfArcDindChrootIdentityHome,
+			"command should include the expected identity.home constant")
+		assert.Contains(t, command, awfArcDindDockerHostRegex,
+			"chroot inject script should reuse the DinD Docker host regex")
+		// Structural: the chroot injection must appear *after* the DOCKER_HOST guard,
+		// confirming it is nested inside the if-block and not emitted at top level.
+		dockerhostIdx := strings.Index(command, awfArcDindDockerHostRegex)
+		binariesIdx := strings.Index(command, "binariesSourcePath")
+		assert.Greater(t, binariesIdx, dockerhostIdx,
+			"chroot injection must appear after the DOCKER_HOST guard in the generated script")
+	})
+
+	t.Run("chroot inject script absent when AWF version too old", func(t *testing.T) {
+		config := AWFCommandConfig{
+			EngineName:    "copilot",
+			EngineCommand: "copilot --prompt-file /tmp/prompt.txt",
+			LogFile:       "/tmp/gh-aw/agent-stdio.log",
+			WorkflowData: &WorkflowData{
+				EngineConfig: &EngineConfig{ID: "copilot"},
+				NetworkPermissions: &NetworkPermissions{
+					Firewall: &FirewallConfig{
+						Enabled: true,
+						Version: "v0.27.0",
+					},
+				},
+			},
+		}
+		command := BuildAWFCommand(config)
+		assert.NotContains(t, command, "binariesSourcePath",
+			"command should NOT include chroot inject script for old AWF version")
+	})
+}
+
 func TestGetGeminiAPITarget(t *testing.T) {
 	tests := []struct {
 		name         string

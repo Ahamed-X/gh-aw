@@ -52,7 +52,10 @@ var buildxDigestPattern = regexp.MustCompile(`(?m)^Digest:\s+(sha256:[a-f0-9]{64
 //
 // When Docker is unavailable the function logs a warning and returns nil so that
 // the overall upgrade flow is not interrupted.
-func UpdateContainerPins(ctx context.Context, workflowDir string, verbose bool) error {
+//
+// Returns true when new container pins were added and lock files should be
+// recompiled to embed the digest references.
+func UpdateContainerPins(ctx context.Context, workflowDir string, verbose bool) (bool, error) {
 	containerPinsLog.Print("Starting container pin update")
 
 	if verbose {
@@ -67,14 +70,14 @@ func UpdateContainerPins(ctx context.Context, workflowDir string, verbose bool) 
 		if verbose {
 			fmt.Fprintln(os.Stderr, console.FormatWarningMessage(fmt.Sprintf("Warning: Failed to collect container images: %v", err)))
 		}
-		return nil
+		return false, nil
 	}
 
 	if len(images) == 0 {
 		if verbose {
 			fmt.Fprintln(os.Stderr, console.FormatVerboseMessage("No container images found in lock files"))
 		}
-		return nil
+		return false, nil
 	}
 
 	containerPinsLog.Printf("Found %d unique container image(s) across lock files", len(images))
@@ -84,8 +87,25 @@ func UpdateContainerPins(ctx context.Context, workflowDir string, verbose bool) 
 	actionCache := workflow.NewActionCache(".")
 	if _, statErr := os.Stat(actionsLockPath); statErr == nil {
 		if loadErr := actionCache.Load(); loadErr != nil {
-			return fmt.Errorf("failed to load actions-lock.json: %w", loadErr)
+			return false, fmt.Errorf("failed to load actions-lock.json: %w", loadErr)
 		}
+	}
+
+	// Build a set of images currently referenced in the compiled lock files so
+	// that stale entries (e.g. superseded AWF versions) can be pruned.
+	imageSet := make(map[string]struct {
+	}, len(images))
+	for _, img := range images {
+		imageSet[img] = struct {
+		}{}
+	}
+
+	// Remove any container pin entries that are no longer referenced by the
+	// compiled lock files.  This keeps actions-lock.json consistent with what
+	// compile actually emits and prevents stale version accumulation.
+	prunedCount := actionCache.PruneStaleContainerPins(imageSet)
+	if prunedCount > 0 {
+		containerPinsLog.Printf("Pruned %d stale container pin(s) from actions-lock.json", prunedCount)
 	}
 
 	// Resolve digests for images that are not yet pinned.
@@ -141,6 +161,11 @@ func UpdateContainerPins(ctx context.Context, workflowDir string, verbose bool) 
 		fmt.Fprintln(os.Stderr, "")
 	}
 
+	if prunedCount > 0 {
+		fmt.Fprintln(os.Stderr, console.FormatInfoMessage(fmt.Sprintf("Pruned %d stale container pin(s) from actions-lock.json", prunedCount)))
+		fmt.Fprintln(os.Stderr, "")
+	}
+
 	if len(skippedImages) > 0 && verbose {
 		fmt.Fprintln(os.Stderr, console.FormatInfoMessage(fmt.Sprintf("%d container image(s) already up to date", len(skippedImages))))
 		fmt.Fprintln(os.Stderr, "")
@@ -154,14 +179,14 @@ func UpdateContainerPins(ctx context.Context, workflowDir string, verbose bool) 
 		fmt.Fprintln(os.Stderr, "")
 	}
 
-	if len(updatedImages) > 0 {
+	if len(updatedImages) > 0 || prunedCount > 0 {
 		if err := actionCache.Save(); err != nil {
-			return fmt.Errorf("failed to save actions-lock.json: %w", err)
+			return false, fmt.Errorf("failed to save actions-lock.json: %w", err)
 		}
 		fmt.Fprintln(os.Stderr, console.FormatInfoMessage("Updated container pins in actions-lock.json"))
 	}
 
-	return nil
+	return len(updatedImages) > 0, nil
 }
 
 // collectImagesFromLockFiles scans all .lock.yml files under workflowDir and returns
@@ -180,7 +205,8 @@ func collectImagesFromLockFiles(workflowDir string) ([]string, error) {
 		return nil, err
 	}
 
-	imageSet := make(map[string]bool)
+	imageSet := make(map[string]struct {
+	})
 
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".lock.yml") {
@@ -200,7 +226,8 @@ func collectImagesFromLockFiles(workflowDir string) ([]string, error) {
 			}
 			for img := range strings.FieldsSeq(matches[1]) {
 				if img != "" {
-					imageSet[img] = true
+					imageSet[img] = struct {
+					}{}
 				}
 			}
 		}

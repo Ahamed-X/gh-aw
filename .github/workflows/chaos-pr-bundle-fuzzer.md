@@ -1,4 +1,5 @@
 ---
+private: true
 name: "Chaos PR Bundle Fuzzer"
 description: Stress-tests safe-output create-pull-request git patch/bundle handling with randomized small-change personas
 on:
@@ -10,11 +11,13 @@ permissions:
   pull-requests: read
   issues: read
 engine:
-  id: copilot
-  model: claude-sonnet-4.6
+  id: pi
+  model: copilot/gpt-5.4
 strict: true
 tools:
   cli-proxy: true
+  github:
+    mode: gh-proxy
   cache-memory: true
   bash: true
 safe-outputs:
@@ -39,6 +42,8 @@ safe-outputs:
 timeout-minutes: 30
 imports:
   - shared/otlp.md
+features:
+  gh-aw-detection: true
 ---
 
 # Chaos PR Bundle Fuzzer

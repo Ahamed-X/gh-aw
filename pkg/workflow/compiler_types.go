@@ -107,6 +107,7 @@ type Compiler struct {
 	requireDocker           bool                     // If true, fail validation when Docker is not available instead of silently skipping
 	ghesCompatFromCLI       bool                     // If true, GHES compat was requested via --ghes CLI flag (takes precedence over aw.json)
 	ghesArtifactCompat      bool                     // If true, emit GHES-compatible v3.x pins for artifact actions instead of the latest v7/v8
+	ownerTypeCache          map[string]string        // Cached GitHub owner type ("User"/"Organization"/"") keyed by owner login; not goroutine-safe (Compiler is used sequentially)
 }
 
 // NewCompiler creates a new workflow compiler with functional options.
@@ -135,7 +136,8 @@ func NewCompiler(opts ...CompilerOption) *Compiler {
 		artifactManager:   NewArtifactManager(),
 		actionPinWarnings: make(map[string]bool), // Initialize warning cache
 		priorManifests:    make(map[string]*GHAWManifest),
-		gitRoot:           gitRoot, // Auto-detected git root
+		ownerTypeCache:    make(map[string]string), // Initialize owner-type cache (keyed by owner login)
+		gitRoot:           gitRoot,                 // Auto-detected git root
 	}
 
 	// Apply functional options
@@ -427,6 +429,14 @@ func (c *Compiler) GetSharedActionCache() *ActionCache {
 	return cache
 }
 
+// GetSharedActionResolver returns the shared action resolver used by this compiler instance.
+// The resolver is lazily initialized on first access and shared across all workflows.
+// It tracks which cache keys were used during compilation, enabling orphaned-entry pruning.
+func (c *Compiler) GetSharedActionResolver() *ActionResolver {
+	_, resolver := c.getSharedActionResolver()
+	return resolver
+}
+
 // SkipIfMatchConfig holds the configuration for skip-if-match conditions
 type SkipIfMatchConfig struct {
 	Query string // GitHub search query to check before running workflow
@@ -594,7 +604,7 @@ type WorkflowData struct {
 	CachedParsedToolsets           []string                        // cached result of ParseGitHubToolsets for the GitHub tool (for performance optimization); populated by applyDefaults
 	CachedAllowedDomainsStr        string                          // cached allowed-domains string for sanitization (for performance optimization); computed once and reused across multiple compilation steps
 	CachedAllowedDomainsComputed   bool                            // true once CachedAllowedDomainsStr has been set; distinguishes "computed empty" from "not yet computed"
-	KnownActionCredentialEnvVars   map[string]bool                 // env vars for clean_known_action_credentials.sh; keyed by GH_AW_CLEAN_* names; nil when no known credential-leaking actions are detected
+	KnownActionCredentialEnvVars   map[string]struct{}             // env vars for clean_known_action_credentials.sh; keyed by GH_AW_CLEAN_* names; nil when no known credential-leaking actions are detected
 	ModelMappings                  map[string][]string             // merged model alias map (builtins + imported workflow aliases + main frontmatter overrides, in priority order); NOT yet emitted to AWF config JSON — pending AWF firewall support (config.models)
 	ModelCosts                     map[string]any                  // model pricing data from frontmatter `models` field (providers structure); merged with built-in models.json at runtime by generate_aw_info.cjs
 }
@@ -628,6 +638,21 @@ func (d *WorkflowData) PinContext() *actionpins.PinContext {
 	if d.ActionResolver != nil {
 		pinCtx.Resolver = d.ActionResolver
 	}
+	// When GH_HOST is set to a non-github.com host (GHES/GHEC), the action
+	// resolver targets that host and fails to resolve actions/* repos which live
+	// on github.com.  Silently falling back to bundled hardcoded pins in that
+	// case produces unverified SHA pins, so disable the fallback.
+	// When GH_HOST is unset, fall back to the programmatic default host (set
+	// for example from auto-detected git remotes).  Mirror setupGHCommand's
+	// (github_cli.go) precedence: GH_HOST wins when present; default host is
+	// only consulted when GH_HOST is absent.
+	if ghHost := os.Getenv("GH_HOST"); ghHost != "" {
+		if ghHost != "github.com" {
+			pinCtx.SkipHardcodedFallback = true
+		}
+	} else if defaultHost := getDefaultGHHost(); defaultHost != "" && defaultHost != "github.com" {
+		pinCtx.SkipHardcodedFallback = true
+	}
 	return pinCtx
 }
 
@@ -644,79 +669,83 @@ type BaseSafeOutputConfig struct {
 
 // SafeOutputsConfig holds configuration for automatic output routes
 type SafeOutputsConfig struct {
-	CreateIssues                    *CreateIssuesConfig                    `yaml:"create-issue,omitempty"`
-	CreateDiscussions               *CreateDiscussionsConfig               `yaml:"create-discussion,omitempty"`
-	UpdateDiscussions               *UpdateDiscussionsConfig               `yaml:"update-discussion,omitempty"`
-	CloseDiscussions                *CloseDiscussionsConfig                `yaml:"close-discussion,omitempty"`
-	CloseIssues                     *CloseIssuesConfig                     `yaml:"close-issue,omitempty"`
-	ClosePullRequests               *ClosePullRequestsConfig               `yaml:"close-pull-request,omitempty"`
-	MarkPullRequestAsReadyForReview *MarkPullRequestAsReadyForReviewConfig `yaml:"mark-pull-request-as-ready-for-review,omitempty"`
-	AddComments                     *AddCommentsConfig                     `yaml:"add-comment,omitempty"`
-	CommentMemory                   *CommentMemoryConfig                   `yaml:"comment-memory,omitempty"` // Persist and update managed memory comments on issues/PRs
-	CreatePullRequests              *CreatePullRequestsConfig              `yaml:"create-pull-request,omitempty"`
-	CreatePullRequestReviewComments *CreatePullRequestReviewCommentsConfig `yaml:"create-pull-request-review-comment,omitempty"`
-	SubmitPullRequestReview         *SubmitPullRequestReviewConfig         `yaml:"submit-pull-request-review,omitempty"`           // Submit a PR review with status (APPROVE, REQUEST_CHANGES, COMMENT)
-	ReplyToPullRequestReviewComment *ReplyToPullRequestReviewCommentConfig `yaml:"reply-to-pull-request-review-comment,omitempty"` // Reply to existing review comments on PRs
-	ResolvePullRequestReviewThread  *ResolvePullRequestReviewThreadConfig  `yaml:"resolve-pull-request-review-thread,omitempty"`   // Resolve a review thread on a pull request
-	CreateCodeScanningAlerts        *CreateCodeScanningAlertsConfig        `yaml:"create-code-scanning-alert,omitempty"`
-	AutofixCodeScanningAlert        *AutofixCodeScanningAlertConfig        `yaml:"autofix-code-scanning-alert,omitempty"`
-	CreateCheckRun                  *CreateCheckRunConfig                  `yaml:"create-check-run,omitempty"` // Create GitHub Check Runs to report agent analysis results
-	AddLabels                       *AddLabelsConfig                       `yaml:"add-labels,omitempty"`
-	RemoveLabels                    *RemoveLabelsConfig                    `yaml:"remove-labels,omitempty"`
-	AddReviewer                     *AddReviewerConfig                     `yaml:"add-reviewer,omitempty"`
-	AssignMilestone                 *AssignMilestoneConfig                 `yaml:"assign-milestone,omitempty"`
-	AssignToAgent                   *AssignToAgentConfig                   `yaml:"assign-to-agent,omitempty"`
-	AssignToUser                    *AssignToUserConfig                    `yaml:"assign-to-user,omitempty"`     // Assign users to issues
-	UnassignFromUser                *UnassignFromUserConfig                `yaml:"unassign-from-user,omitempty"` // Remove assignees from issues
-	UpdateIssues                    *UpdateIssuesConfig                    `yaml:"update-issue,omitempty"`
-	UpdatePullRequests              *UpdatePullRequestsConfig              `yaml:"update-pull-request,omitempty"` // Update GitHub pull request title/body
-	MergePullRequest                *MergePullRequestConfig                `yaml:"merge-pull-request,omitempty"`  // Merge pull requests under constrained policy checks
-	PushToPullRequestBranch         *PushToPullRequestBranchConfig         `yaml:"push-to-pull-request-branch,omitempty"`
-	UploadAssets                    *UploadAssetsConfig                    `yaml:"upload-asset,omitempty"`
-	UploadArtifact                  *UploadArtifactConfig                  `yaml:"upload-artifact,omitempty"`              // Upload files as run-scoped GitHub Actions artifacts
-	UpdateRelease                   *UpdateReleaseConfig                   `yaml:"update-release,omitempty"`               // Update GitHub release descriptions
-	CreateAgentSessions             *CreateAgentSessionConfig              `yaml:"create-agent-session,omitempty"`         // Create GitHub Copilot coding agent sessions
-	UpdateProjects                  *UpdateProjectConfig                   `yaml:"update-project,omitempty"`               // Smart project board management (create/add/update)
-	CreateProjects                  *CreateProjectsConfig                  `yaml:"create-project,omitempty"`               // Create GitHub Projects V2
-	CreateProjectStatusUpdates      *CreateProjectStatusUpdateConfig       `yaml:"create-project-status-update,omitempty"` // Create GitHub project status updates
-	LinkSubIssue                    *LinkSubIssueConfig                    `yaml:"link-sub-issue,omitempty"`               // Link issues as sub-issues
-	HideComment                     *HideCommentConfig                     `yaml:"hide-comment,omitempty"`                 // Hide comments
-	SetIssueType                    *SetIssueTypeConfig                    `yaml:"set-issue-type,omitempty"`               // Set the type of an issue (empty string clears the type)
-	SetIssueField                   *SetIssueFieldConfig                   `yaml:"set-issue-field,omitempty"`              // Set a single issue field value by name/value
-	DispatchWorkflow                *DispatchWorkflowConfig                `yaml:"dispatch-workflow,omitempty"`            // Dispatch workflow_dispatch events to other workflows
-	DispatchRepository              *DispatchRepositoryConfig              `yaml:"dispatch_repository,omitempty"`          // Dispatch repository_dispatch events to external repositories
-	CallWorkflow                    *CallWorkflowConfig                    `yaml:"call-workflow,omitempty"`                // Call reusable workflows via workflow_call fan-out
-	MissingTool                     *MissingToolConfig                     `yaml:"missing-tool,omitempty"`                 // Optional for reporting missing functionality
-	MissingData                     *MissingDataConfig                     `yaml:"missing-data,omitempty"`                 // Optional for reporting missing data required to achieve goals
-	NoOp                            *NoOpConfig                            `yaml:"noop,omitempty"`                         // No-op output for logging only (always available as fallback)
-	ReportIncomplete                *ReportIncompleteConfig                `yaml:"report-incomplete,omitempty"`            // Signal that the task could not be completed due to a tool or infrastructure failure
-	ThreatDetection                 *ThreatDetectionConfig                 `yaml:"threat-detection,omitempty"`             // Threat detection configuration
-	Jobs                            map[string]*SafeJobConfig              `yaml:"jobs,omitempty"`                         // Safe-jobs configuration (moved from top-level)
-	Scripts                         map[string]*SafeScriptConfig           `yaml:"scripts,omitempty"`                      // Custom inline handlers that run in the safe-output handler loop
-	GitHubApp                       *GitHubAppConfig                       `yaml:"github-app,omitempty"`                   // GitHub App credentials for token minting
-	AllowedDomains                  []string                               `yaml:"allowed-domains,omitempty"`              // Allowed domains for URL redaction, unioned with network.allowed; supports ecosystem identifiers
-	AllowGitHubReferences           []string                               `yaml:"allowed-github-references,omitempty"`    // Allowed repositories for GitHub references (e.g., ["repo", "org/repo2"])
-	Staged                          bool                                   `yaml:"staged,omitempty"`                       // If true, emit step summary messages instead of making GitHub API calls
-	Env                             map[string]string                      `yaml:"env,omitempty"`                          // Environment variables to pass to safe output jobs
-	GitHubToken                     string                                 `yaml:"github-token,omitempty"`                 // GitHub token for safe output jobs
-	MaximumPatchSize                int                                    `yaml:"max-patch-size,omitempty"`               // Maximum allowed patch size in KB (defaults to 4096)
-	MaximumPatchFiles               int                                    `yaml:"max-patch-files,omitempty"`              // Maximum allowed unique files per create-pull-request patch (defaults to 100)
-	RunsOn                          string                                 `yaml:"runs-on,omitempty"`                      // Runner configuration for safe-outputs jobs
-	Messages                        *SafeOutputMessagesConfig              `yaml:"messages,omitempty"`                     // Custom message templates for footer and notifications
-	Mentions                        *MentionsConfig                        `yaml:"mentions,omitempty"`                     // Configuration for @mention filtering in safe outputs
-	Footer                          *bool                                  `yaml:"footer,omitempty"`                       // Global footer control - when false, omits visible footer from all safe outputs (XML markers still included)
-	GroupReports                    bool                                   `yaml:"group-reports,omitempty"`                // If true, create parent "Failed runs" issue for agent failures (default: false)
-	ReportFailureAsIssue            *bool                                  `yaml:"report-failure-as-issue,omitempty"`      // If false, disables creating failure tracking issues when workflows fail (default: true)
-	FailureIssueRepo                string                                 `yaml:"failure-issue-repo,omitempty"`           // Repository to create failure issues in (format: "owner/repo"), defaults to current repo
-	MaxBotMentions                  *string                                `yaml:"max-bot-mentions,omitempty"`             // Maximum bot trigger references (e.g. 'fixes #123') allowed before filtering. Default: 10. Supports integer or GitHub Actions expression.
-	Steps                           []any                                  `yaml:"steps,omitempty"`                        // User-provided steps injected after setup/checkout and before safe-output code
-	IDToken                         *string                                `yaml:"id-token,omitempty"`                     // Override id-token permission: "write" to force-add, "none" to disable auto-detection
-	ConcurrencyGroup                string                                 `yaml:"concurrency-group,omitempty"`            // Concurrency group for the safe-outputs job (cancel-in-progress is always false)
-	Needs                           []string                               `yaml:"needs,omitempty"`                        // Additional custom workflow jobs that safe_outputs should depend on
-	Environment                     string                                 `yaml:"environment,omitempty"`                  // Override the GitHub deployment environment for the safe-outputs job (defaults to the top-level environment: field)
-	Actions                         map[string]*SafeOutputActionConfig     `yaml:"actions,omitempty"`                      // Custom GitHub Actions mounted as safe output tools (resolved at compile time)
-	TimeoutMinutes                  int                                    `yaml:"timeout-minutes,omitempty"`              // Timeout for the safe_outputs job in minutes. Defaults to 45.
-	AutoInjectedCreateIssue         bool                                   `yaml:"-"`                                      // Internal: true when create-issues was automatically injected by the compiler (not user-configured)
+	CreateIssues                           *CreateIssuesConfig                    `yaml:"create-issue,omitempty"`
+	CreateDiscussions                      *CreateDiscussionsConfig               `yaml:"create-discussion,omitempty"`
+	UpdateDiscussions                      *UpdateDiscussionsConfig               `yaml:"update-discussion,omitempty"`
+	CloseDiscussions                       *CloseDiscussionsConfig                `yaml:"close-discussion,omitempty"`
+	CloseIssues                            *CloseIssuesConfig                     `yaml:"close-issue,omitempty"`
+	ClosePullRequests                      *ClosePullRequestsConfig               `yaml:"close-pull-request,omitempty"`
+	MarkPullRequestAsReadyForReview        *MarkPullRequestAsReadyForReviewConfig `yaml:"mark-pull-request-as-ready-for-review,omitempty"`
+	AddComments                            *AddCommentsConfig                     `yaml:"add-comment,omitempty"`
+	CommentMemory                          *CommentMemoryConfig                   `yaml:"comment-memory,omitempty"` // Persist and update managed memory comments on issues/PRs
+	CreatePullRequests                     *CreatePullRequestsConfig              `yaml:"create-pull-request,omitempty"`
+	CreatePullRequestReviewComments        *CreatePullRequestReviewCommentsConfig `yaml:"create-pull-request-review-comment,omitempty"`
+	SubmitPullRequestReview                *SubmitPullRequestReviewConfig         `yaml:"submit-pull-request-review,omitempty"`           // Submit a PR review with status (APPROVE, REQUEST_CHANGES, COMMENT)
+	ReplyToPullRequestReviewComment        *ReplyToPullRequestReviewCommentConfig `yaml:"reply-to-pull-request-review-comment,omitempty"` // Reply to existing review comments on PRs
+	ResolvePullRequestReviewThread         *ResolvePullRequestReviewThreadConfig  `yaml:"resolve-pull-request-review-thread,omitempty"`   // Resolve a review thread on a pull request
+	CreateCodeScanningAlerts               *CreateCodeScanningAlertsConfig        `yaml:"create-code-scanning-alert,omitempty"`
+	AutofixCodeScanningAlert               *AutofixCodeScanningAlertConfig        `yaml:"autofix-code-scanning-alert,omitempty"`
+	CreateCheckRun                         *CreateCheckRunConfig                  `yaml:"create-check-run,omitempty"` // Create GitHub Check Runs to report agent analysis results
+	AddLabels                              *AddLabelsConfig                       `yaml:"add-labels,omitempty"`
+	RemoveLabels                           *RemoveLabelsConfig                    `yaml:"remove-labels,omitempty"`
+	ReplaceLabel                           *ReplaceLabelConfig                    `yaml:"replace-label,omitempty"` // Replace one label with another in a single atomic operation
+	AddReviewer                            *AddReviewerConfig                     `yaml:"add-reviewer,omitempty"`
+	AssignMilestone                        *AssignMilestoneConfig                 `yaml:"assign-milestone,omitempty"`
+	AssignToAgent                          *AssignToAgentConfig                   `yaml:"assign-to-agent,omitempty"`
+	AssignToUser                           *AssignToUserConfig                    `yaml:"assign-to-user,omitempty"`     // Assign users to issues
+	UnassignFromUser                       *UnassignFromUserConfig                `yaml:"unassign-from-user,omitempty"` // Remove assignees from issues
+	UpdateIssues                           *UpdateIssuesConfig                    `yaml:"update-issue,omitempty"`
+	UpdatePullRequests                     *UpdatePullRequestsConfig              `yaml:"update-pull-request,omitempty"` // Update GitHub pull request title/body
+	MergePullRequest                       *MergePullRequestConfig                `yaml:"merge-pull-request,omitempty"`  // Merge pull requests under constrained policy checks
+	PushToPullRequestBranch                *PushToPullRequestBranchConfig         `yaml:"push-to-pull-request-branch,omitempty"`
+	UploadAssets                           *UploadAssetsConfig                    `yaml:"upload-asset,omitempty"`
+	UploadArtifact                         *UploadArtifactConfig                  `yaml:"upload-artifact,omitempty"`              // Upload files as run-scoped GitHub Actions artifacts
+	UpdateRelease                          *UpdateReleaseConfig                   `yaml:"update-release,omitempty"`               // Update GitHub release descriptions
+	CreateAgentSessions                    *CreateAgentSessionConfig              `yaml:"create-agent-session,omitempty"`         // Create GitHub Copilot coding agent sessions
+	UpdateProjects                         *UpdateProjectConfig                   `yaml:"update-project,omitempty"`               // Smart project board management (create/add/update)
+	CreateProjects                         *CreateProjectsConfig                  `yaml:"create-project,omitempty"`               // Create GitHub Projects V2
+	CreateProjectStatusUpdates             *CreateProjectStatusUpdateConfig       `yaml:"create-project-status-update,omitempty"` // Create GitHub project status updates
+	LinkSubIssue                           *LinkSubIssueConfig                    `yaml:"link-sub-issue,omitempty"`               // Link issues as sub-issues
+	HideComment                            *HideCommentConfig                     `yaml:"hide-comment,omitempty"`                 // Hide comments
+	SetIssueType                           *SetIssueTypeConfig                    `yaml:"set-issue-type,omitempty"`               // Set the type of an issue (empty string clears the type)
+	SetIssueField                          *SetIssueFieldConfig                   `yaml:"set-issue-field,omitempty"`              // Set a single issue field value by name/value
+	DispatchWorkflow                       *DispatchWorkflowConfig                `yaml:"dispatch-workflow,omitempty"`            // Dispatch workflow_dispatch events to other workflows
+	DispatchRepository                     *DispatchRepositoryConfig              `yaml:"dispatch_repository,omitempty"`          // Dispatch repository_dispatch events to external repositories
+	CallWorkflow                           *CallWorkflowConfig                    `yaml:"call-workflow,omitempty"`                // Call reusable workflows via workflow_call fan-out
+	MissingTool                            *MissingToolConfig                     `yaml:"missing-tool,omitempty"`                 // Optional for reporting missing functionality
+	MissingData                            *MissingDataConfig                     `yaml:"missing-data,omitempty"`                 // Optional for reporting missing data required to achieve goals
+	NoOp                                   *NoOpConfig                            `yaml:"noop,omitempty"`                         // No-op output for logging only (always available as fallback)
+	ReportIncomplete                       *ReportIncompleteConfig                `yaml:"report-incomplete,omitempty"`            // Signal that the task could not be completed due to a tool or infrastructure failure
+	ThreatDetection                        *ThreatDetectionConfig                 `yaml:"threat-detection,omitempty"`             // Threat detection configuration
+	Jobs                                   map[string]*SafeJobConfig              `yaml:"jobs,omitempty"`                         // Safe-jobs configuration (moved from top-level)
+	Scripts                                map[string]*SafeScriptConfig           `yaml:"scripts,omitempty"`                      // Custom inline handlers that run in the safe-output handler loop
+	GitHubApp                              *GitHubAppConfig                       `yaml:"github-app,omitempty"`                   // GitHub App credentials for token minting
+	URLs                                   string                                 `yaml:"urls,omitempty"`                         // URL sanitization policy: SafeOutputsURLsPolicyAllowedOnly (default) or SafeOutputsURLsPolicyAllowedOrCodeRegion
+	AllowedDomains                         []string                               `yaml:"allowed-domains,omitempty"`              // Allowed domains for URL redaction, unioned with network.allowed; supports ecosystem identifiers
+	AllowGitHubReferences                  []string                               `yaml:"allowed-github-references,omitempty"`    // Allowed repositories for GitHub references (e.g., ["repo", "org/repo2"])
+	Staged                                 bool                                   `yaml:"staged,omitempty"`                       // If true, emit step summary messages instead of making GitHub API calls
+	Env                                    map[string]string                      `yaml:"env,omitempty"`                          // Environment variables to pass to safe output jobs
+	GitHubToken                            string                                 `yaml:"github-token,omitempty"`                 // GitHub token for safe output jobs
+	MaximumPatchSize                       int                                    `yaml:"max-patch-size,omitempty"`               // Maximum allowed patch size in KB (defaults to 4096)
+	MaximumPatchFiles                      int                                    `yaml:"max-patch-files,omitempty"`              // Maximum allowed unique files per create-pull-request patch (defaults to 100)
+	RunsOn                                 string                                 `yaml:"runs-on,omitempty"`                      // Runner configuration for safe-outputs jobs
+	Messages                               *SafeOutputMessagesConfig              `yaml:"messages,omitempty"`                     // Custom message templates for footer and notifications
+	Mentions                               *MentionsConfig                        `yaml:"mentions,omitempty"`                     // Configuration for @mention filtering in safe outputs
+	Footer                                 *bool                                  `yaml:"footer,omitempty"`                       // Global footer control - when false, omits visible footer from all safe outputs (XML markers still included)
+	GroupReports                           bool                                   `yaml:"group-reports,omitempty"`                // If true, create parent "Failed runs" issue for agent failures (default: false)
+	ReportFailureAsIssue                   any                                    `yaml:"report-failure-as-issue,omitempty"`      // Controls failure issue creation: bool (true/false) or []interface{} (parsed from YAML array, converted to []string in ReportFailureAsIssueCategories). Default: true
+	ReportFailureAsIssueCategories         []string                               `yaml:"-"`                                      // Parsed failure categories for report-failure-as-issue (internal use only, included categories)
+	ReportFailureAsIssueExcludedCategories []string                               `yaml:"-"`                                      // Parsed excluded failure categories for report-failure-as-issue (internal use only, categories starting with "!")
+	FailureIssueRepo                       string                                 `yaml:"failure-issue-repo,omitempty"`           // Repository to create failure issues in (format: "owner/repo"), defaults to current repo
+	MaxBotMentions                         *string                                `yaml:"max-bot-mentions,omitempty"`             // Maximum bot trigger references (e.g. 'fixes #123') allowed before filtering. Default: 10. Supports integer or GitHub Actions expression.
+	Steps                                  []any                                  `yaml:"steps,omitempty"`                        // User-provided steps injected after setup/checkout and before safe-output code
+	IDToken                                *string                                `yaml:"id-token,omitempty"`                     // Override id-token permission: "write" to force-add, "none" to disable auto-detection
+	ConcurrencyGroup                       string                                 `yaml:"concurrency-group,omitempty"`            // Concurrency group for the safe-outputs job (cancel-in-progress is always false)
+	Needs                                  []string                               `yaml:"needs,omitempty"`                        // Additional custom workflow jobs that safe_outputs should depend on
+	Environment                            string                                 `yaml:"environment,omitempty"`                  // Override the GitHub deployment environment for the safe-outputs job (defaults to the top-level environment: field)
+	Actions                                map[string]*SafeOutputActionConfig     `yaml:"actions,omitempty"`                      // Custom GitHub Actions mounted as safe output tools (resolved at compile time)
+	TimeoutMinutes                         int                                    `yaml:"timeout-minutes,omitempty"`              // Timeout for the safe_outputs job in minutes. Defaults to 45.
+	AutoInjectedCreateIssue                bool                                   `yaml:"-"`                                      // Internal: true when create-issues was automatically injected by the compiler (not user-configured)
 }
 
 // SafeOutputMessagesConfig holds custom message templates for safe-output footer and notification messages
@@ -749,14 +778,22 @@ type MentionsConfig struct {
 	//   nil: use default behavior with team members and context
 	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 
-	// AllowTeamMembers determines if team members can be mentioned (default: true)
-	AllowTeamMembers *bool `yaml:"allow-team-members,omitempty" json:"allowTeamMembers,omitempty"`
+	// AllowedCollaborators determines if repository collaborators can be mentioned (default: true)
+	AllowedCollaborators *bool `yaml:"allowed-collaborators,omitempty" json:"allowedCollaborators,omitempty"`
 
 	// AllowContext determines if mentions from event context are allowed (default: true)
 	AllowContext *bool `yaml:"allow-context,omitempty" json:"allowContext,omitempty"`
 
 	// Allowed is a list of user/bot names always allowed (bots not allowed by default)
 	Allowed []string `yaml:"allowed,omitempty" json:"allowed,omitempty"`
+
+	// AllowedTeams is a list of team slugs whose members are always allowed to be mentioned.
+	// Accepts "team-slug" (resolved against the current org) or "org/team-slug" format.
+	// Requires the workflow token to have read:org scope (a fine-grained PAT, classic PAT with
+	// read:org, or a GitHub App with the Members:Read permission). The default GITHUB_TOKEN
+	// does not include read:org and will produce a 403/404 warning; team members will be skipped
+	// but the workflow will not fail.
+	AllowedTeams []string `yaml:"allowed-teams,omitempty" json:"allowedTeams,omitempty"`
 
 	// Max is the maximum number of mentions per message (default: 50)
 	Max *int `yaml:"max,omitempty" json:"max,omitempty"`

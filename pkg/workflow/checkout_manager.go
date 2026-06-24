@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/github/gh-aw/pkg/logger"
+	"github.com/github/gh-aw/pkg/setutil"
 )
 
 var checkoutManagerLog = logger.New("workflow:checkout_manager")
@@ -161,6 +162,23 @@ type CheckoutManager struct {
 	// on the default-branch checkout behaviour.
 	// An empty string means the checkout uses the repository's default branch.
 	crossRepoTargetRef string
+	// keepCredentialsForPush, when true, makes every generated checkout step retain its
+	// credentials (persist-credentials: true) and suppresses the post-checkout credential
+	// cleanup step. This is enabled for the safe_outputs job, which legitimately performs
+	// git fetch/push against the checked-out repositories (e.g. push_to_pull_request_branch,
+	// create_pull_request) and therefore needs the push-capable token left on disk.
+	//
+	// The agent job leaves this false: the untrusted agent must not be able to read
+	// credentials from disk, so its checkouts use persist-credentials: false.
+	keepCredentialsForPush bool
+	// pushToken is the token expression persisted into .git/config by every generated
+	// checkout step when keepCredentialsForPush is enabled and the checkout entry does
+	// not carry its own explicit token/app auth. Setting this ensures the credential
+	// retained on disk matches the token the safe_outputs handlers use to push, so a
+	// single (correct) Authorization header is sent and no separate per-command
+	// http.extraheader injection is required. Empty means "fall back to the
+	// actions/checkout default token".
+	pushToken string
 }
 
 // NewCheckoutManager creates a new CheckoutManager pre-loaded with user-supplied
@@ -209,6 +227,24 @@ func (cm *CheckoutManager) SetCrossRepoTargetRef(ref string) {
 // SetCrossRepoTargetRef, or an empty string if no cross-repo ref was set.
 func (cm *CheckoutManager) GetCrossRepoTargetRef() string {
 	return cm.crossRepoTargetRef
+}
+
+// SetKeepCredentialsForPush enables credential retention on all generated checkout steps.
+// Call this for the safe_outputs job so the push-capable token installed at checkout time
+// remains in .git/config for subsequent git fetch/push operations. The agent job must not
+// call this; its checkouts intentionally strip credentials (persist-credentials: false).
+func (cm *CheckoutManager) SetKeepCredentialsForPush(keep bool) {
+	checkoutManagerLog.Printf("Setting keepCredentialsForPush: %t", keep)
+	cm.keepCredentialsForPush = keep
+}
+
+// SetPushToken sets the token expression persisted into .git/config by the generated
+// checkout steps when keepCredentialsForPush is enabled. Call this for the safe_outputs
+// job with the resolved PR push token so the retained credential matches the token the
+// handlers use to fetch/push. Has no effect on entries that declare their own token/app.
+func (cm *CheckoutManager) SetPushToken(token string) {
+	checkoutManagerLog.Printf("Setting pushToken: present=%t", token != "")
+	cm.pushToken = token
 }
 
 // add processes a single CheckoutConfig and either creates a new entry or merges
@@ -311,22 +347,6 @@ func (cm *CheckoutManager) GetDefaultCheckoutOverride() *resolvedCheckout {
 	return nil
 }
 
-// GetCheckoutForRepository returns the first resolved checkout entry whose repository
-// field matches repoSlug exactly (e.g. "owner/repo"). Returns nil when no entry
-// targets that repository.
-//
-// This is used by the safe_outputs job to retrieve the fetch refs declared in the
-// checkout: frontmatter for a given cross-repo target, so that the safe_outputs
-// checkout can emit the same "Fetch additional refs" step as the agent job.
-func (cm *CheckoutManager) GetCheckoutForRepository(repoSlug string) *resolvedCheckout {
-	for _, entry := range cm.ordered {
-		if entry.key.repository == repoSlug {
-			return entry
-		}
-	}
-	return nil
-}
-
 // HasAppAuth returns true if any checkout entry uses GitHub App authentication.
 func (cm *CheckoutManager) HasAppAuth() bool {
 	for _, entry := range cm.ordered {
@@ -335,6 +355,21 @@ func (cm *CheckoutManager) HasAppAuth() bool {
 		}
 	}
 	return false
+}
+
+// resolveCheckoutPermissions determines the permissions used when minting checkout
+// GitHub App tokens. Both the agent job and the safe_outputs job resolve them the same
+// way: explicit cached permissions take precedence, then parsed frontmatter permissions,
+// then the default permission set.
+func resolveCheckoutPermissions(data *WorkflowData) *Permissions {
+	switch {
+	case data.CachedPermissions != nil:
+		return data.CachedPermissions
+	case data.Permissions != "":
+		return NewPermissionsParser(data.Permissions).ToPermissions()
+	default:
+		return NewPermissions()
+	}
 }
 
 // GetCurrentRepository returns the repository slug for the checkout marked
@@ -413,21 +448,24 @@ func deeperFetchDepth(a, b *int) *int {
 // mergeSparsePatterns parses and unions sparse-checkout patterns.
 // Patterns can be newline-separated.
 func mergeSparsePatterns(existing []string, newPatterns string) []string {
-	seen := make(map[string]bool, len(existing))
+	seen := make(map[string]struct {
+	}, len(existing))
 	result := make([]string, 0, len(existing))
 
 	for _, p := range existing {
 		p = strings.TrimSpace(p)
-		if p != "" && !seen[p] {
-			seen[p] = true
+		if p != "" && !setutil.Contains(seen, p) {
+			seen[p] = struct {
+			}{}
 			result = append(result, p)
 		}
 	}
 
 	for p := range strings.SplitSeq(newPatterns, "\n") {
 		p = strings.TrimSpace(p)
-		if p != "" && !seen[p] {
-			seen[p] = true
+		if p != "" && !setutil.Contains(seen, p) {
+			seen[p] = struct {
+			}{}
 			result = append(result, p)
 		}
 	}
@@ -437,19 +475,22 @@ func mergeSparsePatterns(existing []string, newPatterns string) []string {
 
 // mergeFetchRefs unions two sets of fetch ref patterns preserving insertion order.
 func mergeFetchRefs(existing []string, newRefs []string) []string {
-	seen := make(map[string]bool, len(existing))
+	seen := make(map[string]struct {
+	}, len(existing))
 	result := make([]string, 0)
 	for _, r := range existing {
 		r = strings.TrimSpace(r)
-		if r != "" && !seen[r] {
-			seen[r] = true
+		if r != "" && !setutil.Contains(seen, r) {
+			seen[r] = struct {
+			}{}
 			result = append(result, r)
 		}
 	}
 	for _, r := range newRefs {
 		r = strings.TrimSpace(r)
-		if r != "" && !seen[r] {
-			seen[r] = true
+		if r != "" && !setutil.Contains(seen, r) {
+			seen[r] = struct {
+			}{}
 			result = append(result, r)
 		}
 	}

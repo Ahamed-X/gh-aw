@@ -1,11 +1,12 @@
 ---
+private: true
 emoji: "🎭"
 description: Explores agentic-workflows custom agent behavior by generating software personas and analyzing responses to common automation tasks
 on: daily
 max-daily-ai-credits: 10000
 engine:
-  id: copilot
-  model: gpt-5.4-mini
+  id: pi
+  model: copilot/gpt-5.4
 permissions:
   contents: read
   actions: read
@@ -36,6 +37,8 @@ experiments:
 # Note: max-turns not available for default Copilot engine (Claude only)
 tools:
   cli-proxy: true
+  github:
+    mode: gh-proxy
   agentic-workflows:
   cache-memory: true
 safe-outputs:
@@ -45,12 +48,16 @@ safe-outputs:
     max: 1
     close-older-issues: true
     expires: false
+  threat-detection:
+    engine: copilot
 timeout-minutes: 180
 imports:
   - shared/reporting.md
 
 
   - shared/otlp.md
+features:
+  gh-aw-detection: true
 ---
 
 # Agent Persona Explorer

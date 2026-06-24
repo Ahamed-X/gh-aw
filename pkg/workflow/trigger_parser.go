@@ -7,10 +7,12 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/goccy/go-yaml"
+
 	"github.com/github/gh-aw/pkg/logger"
 	"github.com/github/gh-aw/pkg/parser"
+	"github.com/github/gh-aw/pkg/setutil"
 	"github.com/github/gh-aw/pkg/sliceutil"
-	"github.com/goccy/go-yaml"
 )
 
 var triggerParserLog = logger.New("workflow:trigger_parser")
@@ -238,17 +240,18 @@ func parsePullRequestTrigger(tokens []string) (*TriggerIR, error) {
 	activityType := tokens[1]
 
 	// Map common activity types
-	validTypes := map[string]bool{
-		"opened":           true,
-		"edited":           true,
-		"closed":           true,
-		"reopened":         true,
-		"synchronize":      true,
-		"assigned":         true,
-		"unassigned":       true,
-		"labeled":          true,
-		"unlabeled":        true,
-		"review_requested": true,
+	validTypes := map[string]struct {
+	}{
+		"opened":           {},
+		"edited":           {},
+		"closed":           {},
+		"reopened":         {},
+		"synchronize":      {},
+		"assigned":         {},
+		"unassigned":       {},
+		"labeled":          {},
+		"unlabeled":        {},
+		"review_requested": {},
 	}
 
 	// Special case: "merged" is not a real type, it's a condition on "closed"
@@ -264,7 +267,7 @@ func parsePullRequestTrigger(tokens []string) (*TriggerIR, error) {
 		}, nil
 	}
 
-	if validTypes[activityType] {
+	if setutil.Contains(validTypes, activityType) {
 		ir := &TriggerIR{
 			Event: "pull_request",
 			Types: []string{activityType},
@@ -328,20 +331,21 @@ func parseIssueTrigger(tokens []string) (*TriggerIR, error) {
 	activityType := tokens[1]
 
 	// Map common activity types
-	validTypes := map[string]bool{
-		"opened":      true,
-		"edited":      true,
-		"closed":      true,
-		"reopened":    true,
-		"assigned":    true,
-		"unassigned":  true,
-		"labeled":     true,
-		"unlabeled":   true,
-		"deleted":     true,
-		"transferred": true,
+	validTypes := map[string]struct {
+	}{
+		"opened":      {},
+		"edited":      {},
+		"closed":      {},
+		"reopened":    {},
+		"assigned":    {},
+		"unassigned":  {},
+		"labeled":     {},
+		"unlabeled":   {},
+		"deleted":     {},
+		"transferred": {},
 	}
 
-	if !validTypes[activityType] {
+	if !setutil.Contains(validTypes, activityType) {
 		return nil, fmt.Errorf("invalid issue activity type: '%s'. Valid types: opened, edited, closed, reopened, assigned, unassigned, labeled, unlabeled, deleted, transferred. Example: 'issue opened'", activityType)
 	}
 
@@ -376,23 +380,24 @@ func parseDiscussionTrigger(tokens []string) (*TriggerIR, error) {
 	activityType := tokens[1]
 
 	// Map common activity types
-	validTypes := map[string]bool{
-		"created":          true,
-		"edited":           true,
-		"deleted":          true,
-		"transferred":      true,
-		"pinned":           true,
-		"unpinned":         true,
-		"labeled":          true,
-		"unlabeled":        true,
-		"locked":           true,
-		"unlocked":         true,
-		"category_changed": true,
-		"answered":         true,
-		"unanswered":       true,
+	validTypes := map[string]struct {
+	}{
+		"created":          {},
+		"edited":           {},
+		"deleted":          {},
+		"transferred":      {},
+		"pinned":           {},
+		"unpinned":         {},
+		"labeled":          {},
+		"unlabeled":        {},
+		"locked":           {},
+		"unlocked":         {},
+		"category_changed": {},
+		"answered":         {},
+		"unanswered":       {},
 	}
 
-	if !validTypes[activityType] {
+	if !setutil.Contains(validTypes, activityType) {
 		return nil, fmt.Errorf("invalid discussion activity type: '%s'. Valid types: created, edited, deleted, transferred, pinned, unpinned, labeled, unlabeled, locked, unlocked, category_changed, answered, unanswered. Example: 'discussion created'", activityType)
 	}
 
@@ -500,17 +505,18 @@ func parseReleaseTrigger(tokens []string) (*TriggerIR, error) {
 
 	activityType := tokens[1]
 
-	validTypes := map[string]bool{
-		"published":   true,
-		"unpublished": true,
-		"created":     true,
-		"edited":      true,
-		"deleted":     true,
-		"prereleased": true,
-		"released":    true,
+	validTypes := map[string]struct {
+	}{
+		"published":   {},
+		"unpublished": {},
+		"created":     {},
+		"edited":      {},
+		"deleted":     {},
+		"prereleased": {},
+		"released":    {},
 	}
 
-	if !validTypes[activityType] {
+	if !setutil.Contains(validTypes, activityType) {
 		return nil, fmt.Errorf("invalid release activity type: '%s'. Valid types: published, unpublished, created, edited, deleted, prereleased, released. Example: 'release published'", activityType)
 	}
 
@@ -659,17 +665,20 @@ func parseDeploymentTrigger(input string) (*TriggerIR, error) {
 
 	// Parse remaining tokens to collect states, skipping conjunctions
 	var states []string
-	seenStates := make(map[string]bool)
-	conjunctions := map[string]bool{"or": true, "and": true}
+	seenStates := make(map[string]struct {
+	})
+	conjunctions := map[string]struct {
+	}{"or": {}, "and": {}}
 	for _, tok := range tokens[1:] {
 		tok = strings.ToLower(strings.TrimRight(tok, ","))
-		if conjunctions[tok] {
+		if setutil.Contains(conjunctions, tok) {
 			continue
 		}
 		if state, ok := stateAliases[tok]; ok {
-			if !seenStates[state] {
+			if !setutil.Contains(seenStates, state) {
 				states = append(states, state)
-				seenStates[state] = true
+				seenStates[state] = struct {
+				}{}
 			}
 		} else {
 			// Unknown token - not a deployment shorthand we can handle

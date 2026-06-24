@@ -25,6 +25,37 @@ const { sanitizeTitle, applyTitlePrefix } = require("./sanitize_title.cjs");
 const { parseDeduplicateByTitle, normalizeTitleForDedup, findDuplicateByTitle } = require("./issue_title_dedup.cjs");
 const { validateCreatePullRequestIntent, validatePushToPullRequestBranchIntent, validateCreateIssueIntent, validateAddCommentIntent } = require("./intent_probe.cjs");
 const { globPatternToRegex } = require("./glob_pattern_helpers.cjs");
+const { resolveInvocationContext } = require("./invocation_context_helpers.cjs");
+const { lstatGuard } = require("./symlink_guard.cjs");
+
+/** PR event names used for target:triggering context validation across all safe-output handlers. */
+const PR_EVENT_NAMES = new Set(["pull_request", "pull_request_target", "pull_request_review", "pull_request_review_comment"]);
+
+/**
+ * Resolve effective event name and payload from an invocation context,
+ * falling back to the raw GitHub Actions context.
+ * @param {ReturnType<typeof resolveInvocationContext> | null | undefined} invocationContext
+ * @param {any} rawContext
+ */
+function resolveEffectiveContext(invocationContext, rawContext) {
+  return {
+    effectiveEventName: invocationContext?.eventName || rawContext.eventName,
+    effectivePayload: invocationContext?.eventPayload || rawContext.payload,
+  };
+}
+
+/**
+ * Read and parse a JSON file.
+ * @param {string} filePath
+ * @returns {any}
+ */
+function readJSONFile(filePath) {
+  return JSON.parse(fs.readFileSync(filePath, "utf8"));
+}
+
+const safeOutputsTools = readJSONFile(path.join(__dirname, "safe_outputs_tools.json"));
+
+const safeOutputsToolMap = new Map(safeOutputsTools.map(tool => [tool.name, tool]));
 
 /**
  * @param {string} error
@@ -61,11 +92,29 @@ function buildMissingTemporaryIdError(toolName, configKey) {
 }
 
 /**
+ * @param {Record<string, any>} safeOutputsConfig
+ * @param {string} toolName
+ * @returns {Record<string, any>}
+ */
+function getSafeOutputsToolConfig(safeOutputsConfig, toolName) {
+  return safeOutputsConfig?.[toolName] || safeOutputsConfig?.[toolName.replace(/_/g, "-")] || {};
+}
+
+/**
  * @param {Record<string, any>} entry
+ * @param {string[]} fieldNames
  * @returns {boolean}
  */
-function hasExplicitAddCommentTargetNumber(entry) {
-  return ["item_number", "pr_number", "pr"].some(field => entry[field] !== undefined && entry[field] !== null && String(entry[field]).trim() !== "");
+function hasExplicitTargetParameter(entry, fieldNames) {
+  return fieldNames.some(field => entry[field] !== undefined && entry[field] !== null && String(entry[field]).trim() !== "");
+}
+
+/**
+ * @param {string} toolName
+ * @returns {{primary?: string, anyOf?: string[]} | null}
+ */
+function getWildcardTargetRequirement(toolName) {
+  return safeOutputsToolMap.get(toolName)?.["x-safe-outputs-target-requirements"]?.["*"] || null;
 }
 
 /**
@@ -154,8 +203,108 @@ function resolvePatchWorkspacePath(workspacePath) {
  */
 function createHandlers(server, appendSafeOutput, config = {}) {
   const TOKEN_THRESHOLD = 16000;
-  const addCommentConfig = config.add_comment || config["add-comment"] || {};
-  const wildcardAddCommentTargetRequiresItemNumber = addCommentConfig.target === "*";
+
+  /**
+   * Session-scoped per-type operation counters.
+   * Incremented on every successful appendSafeOutput call (MCE4 dual enforcement).
+   * @type {Map<string, number>}
+   */
+  const operationCounts = new Map();
+
+  /**
+   * Return the explicitly user-configured max for a safe-output type, or null if not set / unlimited.
+   * Uses getSafeOutputsToolConfig for consistent key-normalisation (hyphens → underscores).
+   * Does NOT fall back to validation-config defaults: MCP-time enforcement is only
+   * applied when the user has explicitly set a limit; downstream enforcement covers defaults.
+   * Per Safe Outputs Specification MCE5: the same config source as the processor.
+   * @param {string} type - normalised safe-output type name (e.g. "add_comment")
+   * @returns {number | null}
+   */
+  function getExplicitMax(type) {
+    const toolConfig = getSafeOutputsToolConfig(config, type);
+    if (!toolConfig || typeof toolConfig !== "object") return null;
+    if (!("max" in toolConfig)) return null;
+    const maxVal = toolConfig.max;
+    if (maxVal === -1) return null; // -1 means unlimited
+    if (typeof maxVal === "number" && Number.isInteger(maxVal) && maxVal > 0) {
+      return maxVal;
+    }
+    return null;
+  }
+
+  /**
+   * Enforce the per-type operation count limit at invocation time.
+   * Throws a JSON-RPC -32602 error when the configured max has already been reached.
+   * Per Safe Outputs Specification MCE4: Dual Enforcement — constraints MUST be
+   * enforced at both invocation time (MCP server) and processing time (safe output
+   * processor) to provide defence-in-depth.
+   * @param {string} type - normalised safe-output type name
+   */
+  function enforcePerTypeMax(type) {
+    const maxAllowed = getExplicitMax(type);
+    if (maxAllowed === null) return; // no explicit limit configured
+    const current = operationCounts.get(type) || 0;
+    if (current >= maxAllowed) {
+      throw {
+        code: -32602,
+        message: `E002: ${type} limit reached — ${current} of ${maxAllowed} already used this run`,
+        data: {
+          constraint: "max",
+          type,
+          limit: maxAllowed,
+          guidance:
+            `You have used all ${maxAllowed} ${type} operations for this run. ` +
+            `Further ${type} calls will be ignored. Prioritize the most important items ` +
+            `(e.g. consolidate multiple updates into one), or call noop. ` +
+            `Note: other safe-output types have independent budgets, so applying one type ` +
+            `without its companion type can leave inconsistent state.`,
+        },
+      };
+    }
+  }
+
+  /**
+   * Append a safe-output entry after enforcing the per-type max count.
+   * Increments the session counter only after a successful write, mirroring the
+   * approach used by inlineReviewCommentCount so that write errors do not advance
+   * the counter.
+   * Per Safe Outputs Specification MCE4: invocation-time half of dual enforcement.
+   * @param {Record<string, any>} entry
+   */
+  const appendSafeOutputCounted = entry => {
+    const type = entry?.type;
+    if (type) enforcePerTypeMax(type);
+    appendSafeOutput(entry);
+    if (type) operationCounts.set(type, (operationCounts.get(type) || 0) + 1);
+  };
+
+  /**
+   * Validate schema-declared explicit target parameters for wildcard-target tools.
+   * @param {Record<string, any>} entry
+   * @returns {{content: Array<{type: "text", text: string}>, isError: true} | null}
+   */
+  const validateWildcardTargetRequirement = entry => {
+    const toolName = entry?.type;
+    const requirement = getWildcardTargetRequirement(toolName);
+    if (!requirement) {
+      return null;
+    }
+
+    const toolConfig = getSafeOutputsToolConfig(config, toolName);
+    if (toolConfig.target !== "*") {
+      return null;
+    }
+
+    const anyOf = Array.isArray(requirement.anyOf) ? requirement.anyOf : [];
+    if (anyOf.length === 0 || hasExplicitTargetParameter(entry, anyOf)) {
+      return null;
+    }
+
+    const configKey = toolName.replace(/_/g, "-");
+    const primary = requirement.primary || anyOf[0];
+    const guidance = anyOf.length === 1 ? primary : `one of: ${anyOf.join(", ")}`;
+    return buildIntentErrorResponse(`${toolName} requires ${primary} when safe-outputs.${configKey}.target is '*'. Provide ${guidance} and retry.`);
+  };
 
   /**
    * Detect and offload large string fields to files.
@@ -184,7 +333,7 @@ function createHandlers(server, appendSafeOutput, config = {}) {
 
     const fileInfo = writeLargeContentToFile(largeContent);
     entry[largeFieldName] = `[Content too large, saved to file: ${fileInfo.filename}]`;
-    appendSafeOutput(entry);
+    appendSafeOutputCounted(entry);
 
     return {
       content: [
@@ -204,11 +353,15 @@ function createHandlers(server, appendSafeOutput, config = {}) {
    */
   const defaultHandler = type => args => {
     const entry = { ...(args || {}), type };
+    const wildcardTargetValidationError = validateWildcardTargetRequirement(entry);
+    if (wildcardTargetValidationError) {
+      return wildcardTargetValidationError;
+    }
     const largeContentResponse = maybeHandleLargeContent(entry);
     if (largeContentResponse) return largeContentResponse;
 
     // Normal case - no large content
-    appendSafeOutput(entry);
+    appendSafeOutputCounted(entry);
     return {
       content: [
         {
@@ -290,7 +443,9 @@ function createHandlers(server, appendSafeOutput, config = {}) {
     }
 
     // Create assets directory
-    const assetsDir = "/tmp/gh-aw/safeoutputs/assets";
+    // Use RUNNER_TEMP so the staged files land on the host filesystem (shared with
+    // the artifact-upload step), matching the same pattern used by upload_artifact.
+    const assetsDir = path.join(process.env.RUNNER_TEMP || "/tmp", "gh-aw", "safeoutputs", "assets");
     if (!fs.existsSync(assetsDir)) {
       fs.mkdirSync(assetsDir, { recursive: true });
     }
@@ -336,7 +491,7 @@ function createHandlers(server, appendSafeOutput, config = {}) {
       targetFileName: targetFileName,
     };
 
-    appendSafeOutput(entry);
+    appendSafeOutputCounted(entry);
 
     return {
       content: [
@@ -540,7 +695,7 @@ function createHandlers(server, appendSafeOutput, config = {}) {
     if (allowEmpty) {
       server.debug(`allow-empty is enabled for create_pull_request - skipping patch generation`);
       // Append the safe output entry without generating a patch
-      appendSafeOutput(entry);
+      appendSafeOutputCounted(entry);
       return {
         content: [
           {
@@ -754,7 +909,7 @@ function createHandlers(server, appendSafeOutput, config = {}) {
         entry.base_commit = bundleResult.baseCommit;
       }
 
-      appendSafeOutput(entry);
+      appendSafeOutputCounted(entry);
       return {
         content: [
           {
@@ -776,7 +931,7 @@ function createHandlers(server, appendSafeOutput, config = {}) {
       };
     }
 
-    appendSafeOutput(entry);
+    appendSafeOutputCounted(entry);
     return {
       content: [
         {
@@ -811,6 +966,10 @@ function createHandlers(server, appendSafeOutput, config = {}) {
     // Drop it so the agent cannot override the derived source branch.
     const { branch: _agentBranch, ...sanitizedArgs } = args || {};
     const entry = { ...sanitizedArgs, type: "push_to_pull_request_branch" };
+    const wildcardTargetValidationError = validateWildcardTargetRequirement(entry);
+    if (wildcardTargetValidationError) {
+      return wildcardTargetValidationError;
+    }
 
     // Resolve target repo configuration and validate the target repo early
     // This is needed before getBaseBranch to ensure we resolve the base branch
@@ -1193,7 +1352,7 @@ function createHandlers(server, appendSafeOutput, config = {}) {
         entry.base_commit = bundleResult.baseCommit;
       }
 
-      appendSafeOutput(entry);
+      appendSafeOutputCounted(entry);
       return {
         content: [
           {
@@ -1215,7 +1374,7 @@ function createHandlers(server, appendSafeOutput, config = {}) {
       };
     }
 
-    appendSafeOutput(entry);
+    appendSafeOutputCounted(entry);
     return {
       content: [
         {
@@ -1467,7 +1626,7 @@ function createHandlers(server, appendSafeOutput, config = {}) {
         };
         const largeContentResponse = maybeHandleLargeContent(droppedEntry);
         if (!largeContentResponse) {
-          appendSafeOutput(droppedEntry);
+          appendSafeOutputCounted(droppedEntry);
         }
         return {
           content: [
@@ -1488,7 +1647,7 @@ function createHandlers(server, appendSafeOutput, config = {}) {
     const largeContentResponse = maybeHandleLargeContent(entry);
     if (largeContentResponse) return largeContentResponse;
 
-    appendSafeOutput(entry);
+    appendSafeOutputCounted(entry);
     return {
       content: [
         {
@@ -1519,7 +1678,7 @@ function createHandlers(server, appendSafeOutput, config = {}) {
     server.debug(`temporary_id for create_project: ${entry.temporary_id}`);
 
     // Append to safe outputs
-    appendSafeOutput(entry);
+    appendSafeOutputCounted(entry);
 
     // Return the temporary_id to the agent so it can reference this project
     return {
@@ -1559,12 +1718,59 @@ function createHandlers(server, appendSafeOutput, config = {}) {
       };
     }
 
+    // Refuse discussion-specific requests when discussions are not enabled in config.
+    // reply_to_id is a discussion-only field; its presence unambiguously means the
+    // agent is targeting a GitHub Discussion.  Guard here (MCP phase) so the agent
+    // gets immediate, actionable feedback rather than a late failure at execution time.
+    const addCommentConfig = getSafeOutputsToolConfig(config, "add_comment");
+    const discussionsEnabled = addCommentConfig.discussions === true;
+    const hasReplyToId = args?.reply_to_id != null && String(args.reply_to_id).trim() !== "";
+    if (hasReplyToId && !discussionsEnabled) {
+      return buildIntentErrorResponse(
+        "add_comment with reply_to_id targets a GitHub Discussion, but discussion comments are not enabled for this workflow. " +
+          "Set 'discussions: true' in the workflow's safe-outputs.add-comment configuration to enable discussion comments and request discussions:write permission."
+      );
+    }
+
+    // Reject target:triggering early when no explicit item number and no issue/PR/discussion context.
+    // Per Safe Outputs Specification MCE1: provides actionable feedback before writing to NDJSON.
+    // Mirrors update_issue validation; explicit item_number bypasses this check because the
+    // downstream handler resolves explicit numbers before falling back to triggering context.
+    const effectiveAddCommentTarget = addCommentConfig.target || "triggering";
+    const hasExplicitItemNumber = args?.item_number != null || args?.issue_number != null || args?.["pr-number"] != null;
+    if (effectiveAddCommentTarget === "triggering" && !hasExplicitItemNumber) {
+      let invocationContext = null;
+      try {
+        invocationContext = resolveInvocationContext(context);
+      } catch (err) {
+        // A validation error (e.g. disallowed target_repo / SEC-005) is a real failure — surface it.
+        if (err?.message?.startsWith(ERR_VALIDATION)) {
+          return buildIntentErrorResponse(err.message);
+        }
+        // Unexpected structural error: skip validation and let downstream handle gracefully.
+      }
+      if (invocationContext != null) {
+        const { effectiveEventName, effectivePayload } = resolveEffectiveContext(invocationContext, context);
+        const isIssueCommentOnPR = effectiveEventName === "issue_comment" && Boolean(effectivePayload?.issue?.pull_request);
+        const isIssueContext = effectiveEventName === "issues" || (effectiveEventName === "issue_comment" && !isIssueCommentOnPR);
+        const isPRContext = PR_EVENT_NAMES.has(effectiveEventName) || isIssueCommentOnPR;
+        const isDiscussionContext = effectiveEventName === "discussion" || effectiveEventName === "discussion_comment";
+        if (!isIssueContext && !isPRContext && !isDiscussionContext) {
+          return buildIntentErrorResponse(
+            `add_comment requires an issue, pull request, or discussion context but the workflow is running on a "${effectiveEventName}" event. ` +
+              `The add-comment handler uses target: triggering which only applies when an issue, pull request, or discussion triggered the workflow. ` +
+              `To report results from this workflow, use create_discussion or create_issue instead. ` +
+              `If you need to comment on a specific item, provide an explicit item_number.`
+          );
+        }
+      }
+    }
+
     // Build the entry with a temporary_id
     const entry = { ...(args || {}), type: "add_comment" };
-    if (wildcardAddCommentTargetRequiresItemNumber) {
-      if (!hasExplicitAddCommentTargetNumber(entry)) {
-        return buildIntentErrorResponse("add_comment requires item_number when safe-outputs.add-comment.target is '*'. Provide item_number (or pr_number/pr alias).");
-      }
+    const wildcardTargetValidationError = validateWildcardTargetRequirement(entry);
+    if (wildcardTargetValidationError) {
+      return wildcardTargetValidationError;
     }
     const intentValidationError = validateAddCommentIntent(entry);
     if (intentValidationError) {
@@ -1583,7 +1789,7 @@ function createHandlers(server, appendSafeOutput, config = {}) {
     server.debug(`temporary_id for add_comment: ${entry.temporary_id}`);
 
     // Append to safe outputs
-    appendSafeOutput(entry);
+    appendSafeOutputCounted(entry);
 
     // Return the temporary_id to the agent so it can reference this comment
     return {
@@ -1619,7 +1825,9 @@ function createHandlers(server, appendSafeOutput, config = {}) {
     // Increment only after the default handler returns successfully; if it throws
     // (e.g. due to large-content rejection or an append write error) the counter
     // must not advance so the empty-review guard remains accurate.
-    inlineReviewCommentCount++;
+    if (!result?.isError) {
+      inlineReviewCommentCount++;
+    }
     return result;
   };
 
@@ -1731,8 +1939,8 @@ function createHandlers(server, appendSafeOutput, config = {}) {
         };
       }
 
-      const stat = fs.lstatSync(filePath);
-      if (stat.isSymbolicLink()) {
+      const stat = lstatGuard(filePath);
+      if (stat === null) {
         throw {
           code: -32602,
           message: `${ERR_VALIDATION}: upload_artifact: symlinks are not allowed: ${filePath}`,
@@ -1760,7 +1968,7 @@ function createHandlers(server, appendSafeOutput, config = {}) {
       server.debug(`upload_artifact: staged ${filePath} as ${destName}`);
     }
 
-    appendSafeOutput(entry);
+    appendSafeOutputCounted(entry);
 
     const temporaryId = entry.temporary_id || null;
     return {
@@ -1777,12 +1985,58 @@ function createHandlers(server, appendSafeOutput, config = {}) {
   };
 
   /**
+   * Handler for update_issue tool
+   * Spec cross-reference: Safe Output Outcome Evaluation §update_issue.
+   * Per Safe Outputs Specification MCE1: Enforces context constraints during tool invocation
+   * to provide immediate feedback to the LLM before recording to NDJSON.
+   * Rejects `target: triggering` (the default) when the workflow has no issue context
+   * (e.g. on schedule or push events), so the agent receives an actionable error
+   * instead of a downstream Process Safe Outputs failure.
+   */
+  const updateIssueHandler = args => {
+    const updateIssueConfig = getSafeOutputsToolConfig(config, "update_issue");
+    const effectiveTarget = updateIssueConfig.target || "triggering";
+
+    if (effectiveTarget === "triggering") {
+      let invocationContext = null;
+      try {
+        invocationContext = resolveInvocationContext(context);
+      } catch (err) {
+        // A validation error (e.g. disallowed target_repo / SEC-005) is a real failure — surface it.
+        if (err?.message?.startsWith(ERR_VALIDATION)) {
+          return buildIntentErrorResponse(err.message);
+        }
+        // Unexpected structural error: skip validation and let downstream handle gracefully.
+      }
+      if (invocationContext != null) {
+        const { effectiveEventName, effectivePayload } = resolveEffectiveContext(invocationContext, context);
+        const isIssueCommentOnPR = effectiveEventName === "issue_comment" && Boolean(effectivePayload?.issue?.pull_request);
+        const isIssueContext = effectiveEventName === "issues" || (effectiveEventName === "issue_comment" && !isIssueCommentOnPR);
+
+        if (!isIssueContext) {
+          return buildIntentErrorResponse(
+            `update_issue requires an issue context but the workflow is running on a "${effectiveEventName}" event. ` +
+              `The update-issue handler uses target: triggering which only applies when an issue triggered the workflow. ` +
+              `To report results from this workflow, use create_discussion or create_issue instead. ` +
+              `If you need to update a specific issue, the workflow must configure update-issue: target: '*' and you must supply issue_number.`
+          );
+        }
+      }
+    }
+
+    return defaultHandler("update_issue")(args || {});
+  };
+
+  /**
    * Handler for update_pull_request tool
    * Spec cross-reference: Safe Output Outcome Evaluation §update_pull_request.
    * Per Safe Outputs Specification MCE1: Enforces constraints during tool invocation
    * to provide immediate feedback to the LLM before recording to NDJSON.
    * Uses hasUpdatePullRequestFields to validate that at least one of 'title', 'body',
    * or 'update_branch' is provided before recording to NDJSON.
+   * Rejects `target: triggering` (the default) when the workflow has no pull request context
+   * (e.g. on schedule or push events), so the agent receives an actionable error
+   * instead of a downstream Process Safe Outputs failure.
    */
   const updatePullRequestHandler = args => {
     if (!hasUpdatePullRequestFields(args)) {
@@ -1790,6 +2044,35 @@ function createHandlers(server, appendSafeOutput, config = {}) {
         code: -32602,
         message: `${ERR_VALIDATION}: update_pull_request requires at least one of: 'title', 'body', 'update_branch' fields`,
       };
+    }
+
+    const updatePRConfig = getSafeOutputsToolConfig(config, "update_pull_request");
+    const effectivePRTarget = updatePRConfig.target || "triggering";
+    if (effectivePRTarget === "triggering") {
+      let invocationContext = null;
+      try {
+        invocationContext = resolveInvocationContext(context);
+      } catch (err) {
+        // A validation error (e.g. disallowed target_repo / SEC-005) is a real failure — surface it.
+        if (err?.message?.startsWith(ERR_VALIDATION)) {
+          return buildIntentErrorResponse(err.message);
+        }
+        // Unexpected structural error: skip validation and let downstream handle gracefully.
+      }
+      if (invocationContext != null) {
+        const { effectiveEventName, effectivePayload } = resolveEffectiveContext(invocationContext, context);
+        const isIssueCommentOnPR = effectiveEventName === "issue_comment" && Boolean(effectivePayload?.issue?.pull_request);
+        const isPRContext = PR_EVENT_NAMES.has(effectiveEventName) || isIssueCommentOnPR;
+
+        if (!isPRContext) {
+          return buildIntentErrorResponse(
+            `update_pull_request requires a pull request context but the workflow is running on a "${effectiveEventName}" event. ` +
+              `The update-pull-request handler uses target: triggering which only applies when a pull request triggered the workflow. ` +
+              `To report results from this workflow, use create_discussion or create_issue instead. ` +
+              `If you need to update a specific pull request, the workflow must configure update-pull-request: target: '*' and you must supply pull_request_number.`
+          );
+        }
+      }
     }
 
     return defaultHandler("update_pull_request")(args || {});
@@ -1807,6 +2090,7 @@ function createHandlers(server, appendSafeOutput, config = {}) {
     addCommentHandler,
     createPullRequestReviewCommentHandler,
     submitPullRequestReviewHandler,
+    updateIssueHandler,
     updatePullRequestHandler,
   };
 }

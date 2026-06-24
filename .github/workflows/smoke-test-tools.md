@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "🧪"
 description: Smoke test to validate common development tools are available in the agent container
 on: 
@@ -50,6 +51,8 @@ safe-outputs:
 timeout-minutes: 5
 imports:
   - shared/otlp.md
+features:
+  gh-aw-detection: true
 ---
 
 # Smoke Test: Agent Container Tools

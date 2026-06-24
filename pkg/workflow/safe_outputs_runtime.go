@@ -24,12 +24,14 @@ var safeOutputsRuntimeLog = logger.New("workflow:safe_outputs_runtime")
 //  3. DefaultActivationJobRunnerImage — compiled-in default
 func (c *Compiler) formatFrameworkJobRunsOn(data *WorkflowData) string {
 	if data != nil && data.SafeOutputs != nil && data.SafeOutputs.RunsOn != "" {
-		safeOutputsRuntimeLog.Printf("Framework job runs-on from safe-outputs: %s", data.SafeOutputs.RunsOn)
-		return "runs-on: " + data.SafeOutputs.RunsOn
+		snippet := normalizeRunsOnSnippet(data.SafeOutputs.RunsOn)
+		safeOutputsRuntimeLog.Printf("Framework job runs-on from safe-outputs: %s", snippet)
+		return c.indentYAMLLines(snippet, "    ")
 	}
 	if data != nil && data.RunsOnSlim != "" {
-		safeOutputsRuntimeLog.Printf("Framework job runs-on from runs-on-slim: %s", data.RunsOnSlim)
-		return c.indentYAMLLines(data.RunsOnSlim, "    ")
+		snippet := normalizeRunsOnSnippet(data.RunsOnSlim)
+		safeOutputsRuntimeLog.Printf("Framework job runs-on from runs-on-slim: %s", snippet)
+		return c.indentYAMLLines(snippet, "    ")
 	}
 	safeOutputsRuntimeLog.Printf("Framework job runs-on using default: %s", constants.DefaultActivationJobRunnerImage)
 	return "runs-on: " + constants.DefaultActivationJobRunnerImage
@@ -51,4 +53,23 @@ func usesPatchesAndCheckouts(safeOutputs *SafeOutputsConfig) bool {
 		safeOutputs.PushToPullRequestBranch != nil, pushToPRNeedsCheckout,
 		result)
 	return result
+}
+
+// buildPRCheckoutCondition builds the `if:` condition gating the safe_outputs job's
+// checkout and git-configuration steps. The steps should run only when a create_pull_request
+// or push_to_pull_request_branch output will actually be processed, so the condition is the
+// OR of whichever of those two safe outputs are configured. Callers should only invoke this
+// when at least one of the two is configured (the default branch assumes push_to_pull_request_branch).
+func buildPRCheckoutCondition(safeOutputs *SafeOutputsConfig) ConditionNode {
+	switch {
+	case safeOutputs.CreatePullRequests != nil && safeOutputs.PushToPullRequestBranch != nil:
+		return BuildOr(
+			BuildSafeOutputType("create_pull_request"),
+			BuildSafeOutputType("push_to_pull_request_branch"),
+		)
+	case safeOutputs.CreatePullRequests != nil:
+		return BuildSafeOutputType("create_pull_request")
+	default:
+		return BuildSafeOutputType("push_to_pull_request_branch")
+	}
 }

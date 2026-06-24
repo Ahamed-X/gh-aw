@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "🧪"
 name: Test Project URL Explicit Requirement
 engine: copilot
@@ -17,7 +18,8 @@ safe-outputs:
   create-project-status-update:
     max: 1
     project: "https://github.com/orgs/<ORG>/projects/<NUMBER>"
-
+features:
+  gh-aw-detection: true
 ---
 
 # Test Explicit Project URL Requirement

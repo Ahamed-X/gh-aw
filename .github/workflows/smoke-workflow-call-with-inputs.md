@@ -1,4 +1,5 @@
 ---
+private: true
 emoji: "🧪"
 name: Smoke Workflow Call with Inputs
 description: Reusable workflow with inputs - used to test that multiple callers don't clash on artifact names
@@ -37,7 +38,8 @@ safe-outputs:
   allowed-domains: [default-safe-outputs]
   noop:
 timeout-minutes: 5
-
+features:
+  gh-aw-detection: true
 ---
 
 # Smoke Test: Workflow Call with Inputs

@@ -38,6 +38,7 @@ import (
 	"slices"
 
 	"github.com/github/gh-aw/pkg/logger"
+	"github.com/github/gh-aw/pkg/setutil"
 )
 
 var mapHelpersLog = logger.New("workflow:map_helpers")
@@ -47,14 +48,16 @@ func excludeMapKeys(original map[string]any, excludeKeys ...string) map[string]a
 	if mapHelpersLog.Enabled() {
 		mapHelpersLog.Printf("excludeMapKeys: input=%d keys, excluding=%v", len(original), excludeKeys)
 	}
-	excludeSet := make(map[string]bool)
+	excludeSet := make(map[string]struct {
+	})
 	for _, key := range excludeKeys {
-		excludeSet[key] = true
+		excludeSet[key] = struct {
+		}{}
 	}
 
 	result := make(map[string]any)
 	for key, value := range original {
-		if !excludeSet[key] {
+		if !setutil.Contains(excludeSet, key) {
 			result[key] = value
 		}
 	}

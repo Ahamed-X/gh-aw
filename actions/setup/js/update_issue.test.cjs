@@ -22,6 +22,7 @@ const mockGithub = {
       update: vi.fn(),
     },
   },
+  graphql: vi.fn(),
 };
 
 const mockContext = {
@@ -70,6 +71,14 @@ describe("update_issue.cjs - footer support", () => {
         title: "Test Issue",
         body: "Updated body",
         html_url: "https://github.com/testowner/testrepo/issues/100",
+      },
+    });
+    mockGithub.graphql.mockResolvedValue({
+      updateIssue: {
+        issue: {
+          id: "I_kwDO_testissue",
+          labels: { nodes: [] },
+        },
       },
     });
   });
@@ -778,6 +787,40 @@ describe("update_issue.cjs - cross-repo and operation integration", () => {
     expect(capturedRepo).toBe("other-repo");
   });
 
+  it("should resolve triggering issue from workflow_dispatch aw_context", async () => {
+    const savedEventName = mockContext.eventName;
+    const savedPayload = mockContext.payload;
+    mockContext.eventName = "workflow_dispatch";
+    mockContext.payload = {
+      inputs: {
+        aw_context: JSON.stringify({
+          event_type: "issue_comment",
+          item_type: "issue",
+          item_number: 123,
+          repo: "testowner/testrepo",
+        }),
+      },
+    };
+    let capturedIssueNumber;
+
+    mockGithub.rest.issues.get.mockResolvedValue({
+      data: { number: 123, title: "Test", body: "Original", html_url: "https://github.com/testowner/testrepo/issues/123" },
+    });
+    mockGithub.rest.issues.update.mockImplementation(async ({ issue_number, body }) => {
+      capturedIssueNumber = issue_number;
+      return { data: { number: issue_number, title: "Test", body, html_url: `https://github.com/testowner/testrepo/issues/${issue_number}` } };
+    });
+
+    const { main } = await import("./update_issue.cjs");
+    const handler = await main();
+    const result = await handler({ body: "Updated from centralized dispatch" }, {});
+
+    expect(result.success).toBe(true);
+    expect(capturedIssueNumber).toBe(123);
+    mockContext.eventName = savedEventName;
+    mockContext.payload = savedPayload;
+  });
+
   it("should use current workflow repo in attribution URL for cross-repo updates", async () => {
     let capturedBody;
 
@@ -884,5 +927,99 @@ describe("update_issue.cjs - cross-repo and operation integration", () => {
     expect(capturedBody).not.toContain("Old island");
     expect(capturedBody).toContain("<!-- gh-aw-island-start:test-workflow -->");
     expect(capturedBody).toContain("<!-- gh-aw-island-end:test-workflow -->");
+  });
+
+  it("should update labels via issue intents GraphQL when the runtime feature is enabled", async () => {
+    process.env.GH_AW_RUNTIME_FEATURES = "issue_intents";
+    let capturedRestBody;
+
+    mockGithub.rest.issues.get.mockResolvedValue({
+      data: {
+        number: 100,
+        node_id: "I_kwDO_testissue",
+        title: "Test",
+        body: "Existing body",
+        html_url: "https://github.com/testowner/testrepo/issues/100",
+      },
+    });
+    mockGithub.rest.issues.update.mockImplementation(async ({ body, labels }) => {
+      capturedRestBody = { body, labels };
+      return {
+        data: {
+          number: 100,
+          node_id: "I_kwDO_testissue",
+          title: "Test",
+          body,
+          html_url: "https://github.com/testowner/testrepo/issues/100",
+        },
+      };
+    });
+    mockGithub.graphql.mockImplementation(async (query, variables) => {
+      if (query.includes("repository(owner")) {
+        return {
+          repository: {
+            labels: {
+              nodes: [
+                { id: "LA_bug", name: "bug" },
+                { id: "LA_perf", name: "perf" },
+              ],
+              pageInfo: { hasNextPage: false, endCursor: null },
+            },
+          },
+        };
+      }
+      if (query.includes("updateIssue(input: { id: $issueId, labels: $labels })")) {
+        return {
+          updateIssue: {
+            issue: {
+              id: variables.issueId,
+              labels: {
+                nodes: [{ name: "bug" }, { name: "perf" }],
+              },
+            },
+          },
+        };
+      }
+      return {};
+    });
+
+    try {
+      const { main } = await import("./update_issue.cjs");
+      const handler = await main({ target: "*" });
+      const result = await handler(
+        {
+          issue_number: 100,
+          labels: [
+            { name: "bug", rationale: "Stack trace matches a known crash path", confidence: "high" },
+            { name: "perf", rationale: "Slow query mentioned in repro steps", confidence: "medium", suggest: true },
+          ],
+        },
+        {}
+      );
+
+      expect(result.success).toBe(true);
+      expect(capturedRestBody).toBeUndefined();
+      expect(mockGithub.graphql).toHaveBeenCalledWith(
+        expect.stringContaining("labels: $labels"),
+        expect.objectContaining({
+          issueId: "I_kwDO_testissue",
+          labels: [
+            {
+              labelId: "LA_bug",
+              rationale: "Stack trace matches a known crash path",
+              confidence: "HIGH",
+            },
+            {
+              labelId: "LA_perf",
+              rationale: "Slow query mentioned in repro steps",
+              confidence: "MEDIUM",
+              suggest: true,
+            },
+          ],
+        })
+      );
+    } finally {
+      delete process.env.GH_AW_RUNTIME_FEATURES;
+    }
   });
 });
